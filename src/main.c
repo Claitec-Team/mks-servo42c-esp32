@@ -20,11 +20,13 @@
 #include "freertos/task.h"
 
 #include "console_serial.h"
+#include "console_tcp.h"
 #include "diag.h"
 #include "mks_servo42c.h"
 #include "servo_cmd.h"
 #include "servo_config.h"
 #include "servo_ctl.h"
+#include "wifi_link.h"
 
 static const char *TAG = "app";
 
@@ -107,5 +109,11 @@ void app_main(void)
     ESP_ERROR_CHECK(servo_ctl_start(&servo));
     ESP_ERROR_CHECK(console_serial_start());
 
-    /* Everything from here on happens in the servo and console tasks. */
+    /* Remote control, if servo_config.h has a network configured. The TCP
+     * listener retries until the stack is up, so ordering does not matter. */
+    if (wifi_link_start() == ESP_OK) {
+        ESP_ERROR_CHECK(console_tcp_start(SERVO_TCP_PORT));
+    }
+
+    /* Everything from here on happens in the servo, console and network tasks. */
 }

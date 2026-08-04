@@ -44,6 +44,45 @@
 #define SERVO_REPLY_TIMEOUT_MS   300
 
 /* ------------------------------------------------------------------ */
+/* WiFi remote control                                                 */
+/* ------------------------------------------------------------------ */
+/*
+ * Credentials come from the environment at build time, so they are never
+ * committed. platformio.ini maps them:
+ *
+ *     export WIFI_CLAITEC_SSID='your-ssid'
+ *     export WIFI_CLAITEC_PASS='your-password'
+ *     pio run -t upload
+ *
+ * With either variable unset the macro below stays empty, the radio is never
+ * started, and the firmware behaves exactly as it did without WiFi.
+ *
+ * SECURITY: the command port is unauthenticated and unencrypted. Anyone who
+ * can reach this port can drive the motor. Use it on a network you trust, and
+ * do not forward the port through a router.
+ */
+/* Written by scripts/wifi_credentials.py before each build. Guarded so that an
+ * editor or a checkout that has not been built yet still parses this header. */
+#if defined(__has_include)
+#if __has_include("wifi_credentials.h")
+#include "wifi_credentials.h"
+#endif
+#endif
+
+#ifndef SERVO_WIFI_SSID
+#define SERVO_WIFI_SSID      ""
+#endif
+#ifndef SERVO_WIFI_PASSWORD
+#define SERVO_WIFI_PASSWORD  ""
+#endif
+
+/* Advertised over DHCP, so you can use it instead of hunting for the IP. */
+#define SERVO_WIFI_HOSTNAME  "mks-servo42c"
+
+/* TCP port for the command interface: `nc <ip> 3333`. */
+#define SERVO_TCP_PORT       3333
+
+/* ------------------------------------------------------------------ */
 /* Demo behaviour (src/main.c)                                         */
 /* ------------------------------------------------------------------ */
 

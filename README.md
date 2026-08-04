@@ -83,7 +83,7 @@ parse them.
 
 | Command | Purpose |
 | ------- | ------- |
-| `help` / `info` / `status` | command list, local geometry, full readback |
+| `help` / `info` / `status` / `net` | command list, local geometry, full readback, network state |
 | `read <encoder\|angle\|error\|pulses\|en\|protect>` | one field |
 | `enable [0\|1]` / `disable` / `stop` | motor power and stopping |
 | `move <deg> [rpm]` / `rev <revs> [rpm]` | relative positioning, blocks until done |
@@ -171,26 +171,83 @@ command finishes, so replies land before it.
 `cal` and `zero go` are not pre-emptible: the servo itself is busy for the
 duration and there is nothing useful to interrupt.
 
-### Adding a WiFi transport
+## Remote control over WiFi
 
-A socket transport reuses all of the above unchanged — implement `write`, then
-submit:
+Credentials come from the environment at build time, so they never enter the
+repository:
+
+```sh
+export WIFI_CLAITEC_SSID='your-ssid'
+export WIFI_CLAITEC_PASS='your-password'
+pio run -t upload && pio device monitor
+```
+
+`scripts/wifi_credentials.py` writes them into `include/wifi_credentials.h`
+(gitignored) before each build. With the variables unset the SSID is empty, the
+radio is never started, and the firmware behaves exactly as it does without
+WiFi — so an unconfigured checkout still builds and runs.
+
+Find the address from the serial console, then connect:
+
+```
+servo> net
+wifi      "your-ssid", connected
+address   192.168.1.57 (hostname mks-servo42c)
+tcp       port 3333, 0 client(s)
+OK net
+```
+
+```sh
+$ nc 192.168.1.57 3333          # or: nc mks-servo42c 3333
+MKS SERVO42C. One command per line, 'help' for a list.
+enable 1
+OK enable
+rev 20 10
+.. moving 20.000 rev at 10.0 rpm
+stop
+OK move aborted
+OK stop
+```
+
+The full command set is available, identical to the serial console. There is no
+prompt over TCP, which keeps the stream easy to parse: every line begins with
+`OK`, `ERR` or `..`.
+
+Up to four clients may connect at once and the serial console keeps working
+alongside them. Because every transport funnels through `servo_ctl`, commands
+from different clients are serialised, and a `stop` from any of them pre-empts a
+move started by another.
+
+Since the line protocol is plain text, scripting it needs no library:
+
+```sh
+printf 'enable 1\nmove 90\nread angle\n' | nc -q1 192.168.1.57 3333
+```
+
+> **Security.** The port is unauthenticated and unencrypted: anyone who can
+> reach it can drive the motor. Use it only on a network you trust, and do not
+> forward the port through a router. The credentials are also compiled into the
+> firmware image, so treat `firmware.bin` as a secret too.
+
+### Adding another transport
+
+Implement one `write` callback and submit; everything else is inherited:
 
 ```c
-static void tcp_write(void *ctx, const char *text)
-{
-    send(*(int *)ctx, text, strlen(text), 0);
-}
+static void my_write(void *ctx, const char *text) { /* send `text` somewhere */ }
 
-int client_fd = /* accepted socket */;
-cmd_sink_t sink = { .write = tcp_write, .ctx = &client_fd };   /* prompt = NULL */
+cmd_sink_t sink = { .write = my_write, .ctx = whatever, .prompt = NULL };
 servo_ctl_submit(line, &sink);
 ```
 
-`servo_ctl` installs the abort hook itself, so a WiFi client's `stop` pre-empts a
-move started from the serial console and vice versa. Keep `ctx` alive until the
-command has run: replies are delivered from the servo task, after
-`servo_ctl_submit()` has already returned.
+`servo_ctl` installs the abort hook itself, so pre-emption works from any
+transport. One caveat that `console_tcp.c` shows how to handle: replies are
+delivered later, from the servo task, so `ctx` must still be valid — or at least
+safe to interpret — after `servo_ctl_submit()` returns. The TCP transport packs a
+slot index and a generation counter into `ctx` instead of a pointer, and drops
+the reply if that slot no longer holds the same connection. A raw `int *` to a
+socket would risk writing one client's reply into another client's connection
+after a disconnect reused the descriptor.
 
 ## Using the driver
 
@@ -315,17 +372,20 @@ goes to the ESP32's RX pin. Use the header's own `G` as the ground reference.
 ## Layout
 
 ```
-platformio.ini            build config: env:esp32dev and env:diag
-sdkconfig.defaults        ESP-IDF options (4 MB flash, full printf, console on UART0)
-CMakeLists.txt            IDF project entry point
-include/servo_config.h    wiring, baud, address, motor and demo settings
-include/mks_servo42c.h    driver API
-src/mks_servo42c.c        protocol implementation
-src/servo_cmd.c           text command layer, transport-agnostic
-src/servo_ctl.c           servo task: owns the handle, queues, pre-emption
-src/console_serial.c      UART0 transport for the command layer
-src/diag.c                link diagnostics (env:diag only)
-src/main.c                startup: bring up the link, start the console
+platformio.ini              build config: env:esp32dev and env:diag
+sdkconfig.defaults          ESP-IDF options (4 MB flash, full printf, console on UART0)
+CMakeLists.txt              IDF project entry point
+scripts/wifi_credentials.py generates wifi_credentials.h from the environment
+include/servo_config.h      wiring, baud, address, motor, wifi and demo settings
+include/mks_servo42c.h      driver API
+src/mks_servo42c.c          protocol implementation
+src/servo_cmd.c             text command layer, transport-agnostic
+src/servo_ctl.c             servo task: owns the handle, queues, pre-emption
+src/console_serial.c        UART0 transport for the command layer
+src/console_tcp.c           TCP transport, up to four concurrent clients
+src/wifi_link.c             station setup and reconnection
+src/diag.c                  link diagnostics (env:diag only)
+src/main.c                  startup: bring up the link, start the transports
 ```
 
 ## References

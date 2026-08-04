@@ -6,5 +6,9 @@
 
 # Generated from sdkconfig.defaults on first build
 sdkconfig.esp32dev
+sdkconfig.diag
 sdkconfig.old
 compile_commands.json
+
+# WiFi credentials, generated from the environment on every build
+include/wifi_credentials.h

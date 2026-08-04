@@ -5,6 +5,8 @@ idf_component_register(
         "servo_cmd.c"
         "servo_ctl.c"
         "console_serial.c"
+        "console_tcp.c"
+        "wifi_link.c"
         "diag.c"
     INCLUDE_DIRS
         "."
@@ -12,4 +14,9 @@ idf_component_register(
     REQUIRES
         driver
         esp_timer
+        esp_wifi
+        esp_netif
+        esp_event
+        nvs_flash
+        lwip
 )

@@ -10,7 +10,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "console_tcp.h"
 #include "servo_config.h"
+#include "wifi_link.h"
 
 #define CMD_MAX_ARGS 12
 #define CMD_LINE_OUT 256
@@ -705,6 +707,27 @@ static void cmd_info(int argc, char **argv, const cmd_sink_t *s)
     cmd_printf(s, "OK info\r\n");
 }
 
+static void cmd_net(int argc, char **argv, const cmd_sink_t *s)
+{
+    (void)argc; (void)argv;
+
+    if (SERVO_WIFI_SSID[0] == '\0') {
+        cmd_printf(s, "wifi      off\r\n");
+        cmd_printf(s, ".. build with WIFI_CLAITEC_SSID and WIFI_CLAITEC_PASS set "
+                      "to enable it\r\n");
+        cmd_printf(s, "OK net\r\n");
+        return;
+    }
+
+    cmd_printf(s, "wifi      \"%s\", %s\r\n", SERVO_WIFI_SSID,
+               wifi_link_is_connected() ? "connected" : "not connected");
+    cmd_printf(s, "address   %s (hostname %s)\r\n",
+               wifi_link_ip(), SERVO_WIFI_HOSTNAME);
+    cmd_printf(s, "tcp       port %d, %u client(s)\r\n",
+               SERVO_TCP_PORT, console_tcp_clients());
+    cmd_printf(s, "OK net\r\n");
+}
+
 static void cmd_demo(int argc, char **argv, const cmd_sink_t *s)
 {
     (void)argc; (void)argv;
@@ -803,6 +826,7 @@ static void cmd_help(int argc, char **argv, const cmd_sink_t *s);
 static const cmd_entry_t kCommands[] = {
     { "help",      1, cmd_help,      "help                       this list" },
     { "info",      1, cmd_info,      "info                       link and geometry" },
+    { "net",       1, cmd_net,       "net                        wifi and tcp status" },
     { "status",    1, cmd_status,    "status                     read everything" },
     { "read",      2, cmd_read,      "read <encoder|angle|error|pulses|en|protect>" },
     { "enable",    1, cmd_enable,    "enable [0|1]               energise the motor" },
