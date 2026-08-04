@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "mks_servo42c.c"
+        "diag.c"
     INCLUDE_DIRS
         "."
         "../include"

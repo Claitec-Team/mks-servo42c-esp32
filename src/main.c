@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "diag.h"
 #include "mks_servo42c.h"
 #include "servo_config.h"
 
@@ -164,6 +165,12 @@ static void run_demo_cycle(void)
 
 void app_main(void)
 {
+#if defined(RUN_DIAGNOSTICS) && RUN_DIAGNOSTICS
+    /* pio run -e diag -t upload && pio device monitor -e diag */
+    diag_run();
+    return;
+#endif
+
     const mks_config_t cfg = {
         .uart_num         = SERVO_UART_PORT,
         .tx_gpio          = SERVO_TX_GPIO,

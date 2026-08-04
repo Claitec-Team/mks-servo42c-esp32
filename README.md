@@ -151,6 +151,27 @@ chk = (sum of all preceding bytes in the frame) & 0xFF     "CHECKSUM-8"
 Every frame this driver emits was checked byte-for-byte against the examples in
 the manual (parts 5.1–5.5 and 6.4).
 
+## Diagnostics
+
+When the link does not come up, flash the diagnostics firmware instead of the demo:
+
+```sh
+pio run -e diag -t upload && pio device monitor -e diag
+```
+
+It runs four phases and never aborts on an error:
+
+1. **passive listen** — dumps anything arriving on the RX pin
+2. **baud sweep** — sends read-encoder at 9600/19200/25000/38400/57600/115200,
+   both with and without the trailing checksum byte (V1.0 firmware expects none),
+   and prints every raw byte that comes back
+3. **address sweep** — tries slave addresses 0xE0–0xE9
+4. **loopback** — with the servo unplugged and a jumper from GPIO17 to GPIO16,
+   proves whether the ESP32 half of the link works at all
+
+A reply in phase 2 or 3 gives you the working baud rate and address; put them in
+`include/servo_config.h` and rebuild the demo.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -161,6 +182,12 @@ the manual (parts 5.1–5.5 and 6.4).
 | Motor stalls or skips | current too low (`mks_set_current_ma`), acceleration too aggressive (`mks_set_acceleration`), or supply voltage too low |
 | Stall protection keeps tripping | clear with `mks_release_protect()`; run `Cal` and check the mechanics |
 | `ESP_ERR_INVALID_CRC` occasionally | long or unshielded UART wiring, or a ground loop |
+| Nothing at all, servo `Tx` sits at 0 V | wrong header — the UART pins are the 4-pin `3V3 / G / Tx / Rx` group, not `Com / En / Stp / Dir` |
+| Nothing at all on GPIO16/17 | ESP32-WROVER modules wire GPIO16/17 to the PSRAM chip; use different pins (phase 4 of the diagnostics confirms this) |
+
+The servo's UART header is `3V3` / `G` / `Tx` / `Rx`, where `3V3` is left floating
+and the labels are from the *servo's* point of view — its `Tx` is an output, so it
+goes to the ESP32's RX pin. Use the header's own `G` as the ground reference.
 
 ## Layout
 
