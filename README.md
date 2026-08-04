@@ -108,31 +108,72 @@ session keeps working; edit `servo_config.h` to make the change survive a reboot
 If the servo does not answer at boot, the firmware prints a wiring/config
 checklist and still starts the console, so you can probe by hand with `raw`.
 
-## Adding a WiFi transport
+## Architecture
 
-The command layer is deliberately transport-agnostic. `servo_cmd.c` never touches
-a UART: a transport supplies a `cmd_sink_t` (one `write(ctx, text)` callback) and
-calls `servo_cmd_execute_line()`. `console_serial.c` is the UART0 implementation
-and is about 100 lines; a TCP or HTTP handler would look the same:
-
-```c
-static void tcp_write(void *ctx, const char *text) { send(*(int *)ctx, text, strlen(text), 0); }
-
-int client_fd = /* accepted socket */;
-cmd_sink_t sink = { .write = tcp_write, .ctx = &client_fd };
-servo_cmd_execute_line(line, &sink);
+```
+  transport                    servo_ctl                    servo_cmd + driver
+  ---------                    ---------                    ------------------
+  console_serial.c  submit()   [ urgent queue ]  dequeue     servo_cmd_execute_line()
+  (or a socket)     ------->   [ normal queue ]  ------->    mks_* on UART2
+                                                   |
+                       replies via cmd_sink_t <-----+
 ```
 
-Two things to settle when that lands:
+A single **servo task** owns the `mks_t` handle and is the only code that talks to
+the UART. Transports never call the driver; they queue a command line with
+`servo_ctl_submit()` and receive replies later through their `cmd_sink_t`.
 
-- **Serialisation.** `mks_t` is not thread-safe — one request/reply exchange must
-  finish before the next starts. With more than one transport, funnel commands
-  through a single servo-owning task and a queue rather than calling
-  `servo_cmd_execute_line()` from each connection.
-- **Blocking moves.** `move`/`rev` wait for the servo's "run complete" reply, so a
-  long move holds the caller for its duration and `stop` cannot get through.
-  A command queue fixes this too, by letting the servo task poll for completion
-  while still accepting `stop`.
+That solves two problems at once:
+
+- **Serialisation.** `mks_t` is not thread-safe — one request/reply exchange has to
+  finish before the next begins, or two callers read each other's replies. With
+  every transport funnelling through one task, several can be connected at once.
+- **Pre-emptible moves.** `stop` and `disable` go to a separate urgent queue that
+  is always served first. Long-running commands (`move`, `rev`, `pulses`, `demo`)
+  poll that queue instead of blocking on the servo's "run complete" reply, so a
+  stop typed mid-move takes effect immediately:
+
+```
+servo> rev 20 10
+.. moving 20.000 rev at 10.0 rpm
+stop
+OK move aborted
+OK stop
+servo>
+```
+
+On pre-emption the move handler halts the motor itself and then discards whatever
+the interrupted move reports, so the next command cannot mistake a stale frame
+for its own reply. A stop that arrives before the move has started suppresses the
+motion command entirely rather than letting the motor twitch.
+
+The serial console never blocks on command completion — that is what lets it read
+a `stop` while a move is running. The prompt is written by the servo task once a
+command finishes, so replies land before it.
+
+`cal` and `zero go` are not pre-emptible: the servo itself is busy for the
+duration and there is nothing useful to interrupt.
+
+### Adding a WiFi transport
+
+A socket transport reuses all of the above unchanged — implement `write`, then
+submit:
+
+```c
+static void tcp_write(void *ctx, const char *text)
+{
+    send(*(int *)ctx, text, strlen(text), 0);
+}
+
+int client_fd = /* accepted socket */;
+cmd_sink_t sink = { .write = tcp_write, .ctx = &client_fd };   /* prompt = NULL */
+servo_ctl_submit(line, &sink);
+```
+
+`servo_ctl` installs the abort hook itself, so a WiFi client's `stop` pre-empts a
+move started from the serial console and vice versa. Keep `ctx` alive until the
+command has run: replies are delivered from the servo task, after
+`servo_ctl_submit()` has already returned.
 
 ## Using the driver
 
@@ -264,6 +305,7 @@ include/servo_config.h    wiring, baud, address, motor and demo settings
 include/mks_servo42c.h    driver API
 src/mks_servo42c.c        protocol implementation
 src/servo_cmd.c           text command layer, transport-agnostic
+src/servo_ctl.c           servo task: owns the handle, queues, pre-emption
 src/console_serial.c      UART0 transport for the command layer
 src/diag.c                link diagnostics (env:diag only)
 src/main.c                startup: bring up the link, start the console

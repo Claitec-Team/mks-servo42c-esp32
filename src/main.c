@@ -24,6 +24,7 @@
 #include "mks_servo42c.h"
 #include "servo_cmd.h"
 #include "servo_config.h"
+#include "servo_ctl.h"
 
 static const char *TAG = "app";
 
@@ -101,8 +102,10 @@ void app_main(void)
     apply_settings();
 #endif
 
-    servo_cmd_init(&servo);
+    /* The servo task takes ownership of `servo` from here on; nothing else may
+     * touch it. Transports submit command lines through servo_ctl_submit(). */
+    ESP_ERROR_CHECK(servo_ctl_start(&servo));
     ESP_ERROR_CHECK(console_serial_start());
 
-    /* Everything from here on happens in the console task. */
+    /* Everything from here on happens in the servo and console tasks. */
 }

@@ -135,6 +135,9 @@ float mks_speed_code_to_rpm(const mks_t *handle, uint8_t code);
 /* Inverse of the above, clamped to the usable 1..127 code range. */
 uint8_t mks_rpm_to_speed_code(const mks_t *handle, float rpm);
 
+/* Pulses needed to turn the shaft by `degrees` (sign ignored). */
+uint32_t mks_degrees_to_pulses(const mks_t *handle, float degrees);
+
 /* ------------------------------------------------------------------ */
 /* 5.1  Read parameters                                                */
 /* ------------------------------------------------------------------ */
@@ -266,8 +269,14 @@ esp_err_t mks_move_pulses(mks_t *h, mks_dir_t dir, uint8_t speed_code,
                           uint32_t move_timeout_ms);
 
 /* Waits for the trailing "run complete" reply of a non-blocking
- * mks_move_pulses(). Returns ESP_ERR_TIMEOUT if it does not arrive. */
+ * mks_move_pulses(). Returns ESP_ERR_TIMEOUT if it does not arrive, without
+ * consuming anything, so it doubles as a poll when given a short timeout. */
 esp_err_t mks_wait_move_complete(mks_t *h, uint32_t timeout_ms);
+
+/* Throws away bytes nobody is waiting for - typically the trailing "run
+ * complete" of a move that was cut short by a stop. Returns once the line has
+ * been silent for `quiet_ms`, or sooner if it never chattered. */
+esp_err_t mks_discard_pending(mks_t *h, uint32_t quiet_ms);
 
 /* mks_move_pulses() with the distance given in degrees and the speed in RPM.
  * A negative `degrees` moves counter-clockwise. */

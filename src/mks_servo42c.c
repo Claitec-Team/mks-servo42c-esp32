@@ -341,6 +341,49 @@ uint8_t mks_rpm_to_speed_code(const mks_t *handle, float rpm)
     return (uint8_t)rounded;
 }
 
+uint32_t mks_degrees_to_pulses(const mks_t *handle, float degrees)
+{
+    if (degrees < 0.0f) {
+        degrees = -degrees;
+    }
+    float pulses = degrees / 360.0f * (float)mks_pulses_per_rev(handle);
+    long rounded = lroundf(pulses);
+    return (rounded < 0) ? 0u : (uint32_t)rounded;
+}
+
+esp_err_t mks_discard_pending(mks_t *h, uint32_t quiet_ms)
+{
+    if (h == NULL || !h->uart_owned) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (quiet_ms == 0) {
+        quiet_ms = 1;
+    }
+
+    /* Stop after a few quiet windows' worth of chatter so a servo that talks
+     * continuously cannot pin us here forever. */
+    const int64_t give_up_at = esp_timer_get_time() + (int64_t)quiet_ms * 1000 * 5;
+    uint8_t scratch[16];
+    size_t dropped = 0;
+
+    for (;;) {
+        int n = uart_read_bytes(h->cfg.uart_num, scratch, sizeof(scratch),
+                               pdMS_TO_TICKS(quiet_ms));
+        if (n <= 0) {
+            break;                       /* silent for a full window: done */
+        }
+        dropped += (size_t)n;
+        if (esp_timer_get_time() > give_up_at) {
+            break;
+        }
+    }
+    uart_flush_input(h->cfg.uart_num);
+    if (dropped > 0) {
+        ESP_LOGD(TAG, "discarded %u stale byte(s)", (unsigned)dropped);
+    }
+    return ESP_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /* 5.1  Read parameters                                                */
 /* ------------------------------------------------------------------ */
@@ -699,11 +742,9 @@ esp_err_t mks_move_degrees(mks_t *h, float degrees, float rpm,
                            bool wait_complete, uint32_t move_timeout_ms)
 {
     mks_dir_t dir = (degrees < 0.0f) ? MKS_DIR_CCW : MKS_DIR_CW;
-    float magnitude = fabsf(degrees);
-    float pulses_f = magnitude / 360.0f * (float)mks_pulses_per_rev(h);
-    uint32_t pulses = (uint32_t)lroundf(pulses_f);
 
-    return mks_move_pulses(h, dir, mks_rpm_to_speed_code(h, rpm), pulses,
+    return mks_move_pulses(h, dir, mks_rpm_to_speed_code(h, rpm),
+                           mks_degrees_to_pulses(h, degrees),
                            wait_complete, move_timeout_ms);
 }
 

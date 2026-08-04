@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 
 #include "servo_cmd.h"
+#include "servo_ctl.h"
 
 static const char *TAG = "console";
 
@@ -30,7 +31,13 @@ static void console_write(void *ctx, const char *text)
     uart_write_bytes(CONSOLE_UART, text, strlen(text));
 }
 
-static const cmd_sink_t g_sink = { .write = console_write, .ctx = NULL };
+/* The servo task writes the prompt once a command has actually finished, so
+ * that it lands after the reply rather than before it. */
+static const cmd_sink_t g_sink = {
+    .write  = console_write,
+    .ctx    = NULL,
+    .prompt = PROMPT,
+};
 
 static void echo(const char *text)
 {
@@ -45,6 +52,7 @@ static void console_task(void *arg)
 
     echo("\r\n");
     echo("MKS SERVO42C control console. Type 'help'.\r\n");
+    echo("'stop' works while a move is running.\r\n");
     echo(PROMPT);
 
     for (;;) {
@@ -58,10 +66,13 @@ static void console_task(void *arg)
             echo("\r\n");
             if (len > 0) {
                 line[len] = '\0';
-                servo_cmd_execute_line(line, &g_sink);
+                /* Hand off to the servo task and go straight back to reading,
+                 * so a 'stop' typed during a long move is not stuck behind it. */
+                servo_ctl_submit(line, &g_sink);
                 len = 0;
+            } else {
+                echo(PROMPT);
             }
-            echo(PROMPT);
         } else if (ch == 0x08 || ch == 0x7F) {          /* backspace / delete */
             if (len > 0) {
                 len--;

@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "mks_servo42c.c"
         "servo_cmd.c"
+        "servo_ctl.c"
         "console_serial.c"
         "diag.c"
     INCLUDE_DIRS

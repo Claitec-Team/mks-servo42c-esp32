@@ -91,6 +91,96 @@ static bool parse_bool(const char *s, bool *out)
     return false;
 }
 
+/* How often a long-running command checks for a pre-empting stop. */
+#define ABORT_POLL_MS 50
+
+static bool abort_requested(const cmd_sink_t *s)
+{
+    return s != NULL && s->abort_requested != NULL && s->abort_requested(s->ctx);
+}
+
+/* Sleeps in short slices, returning early if a pre-empting command arrives. */
+static bool sleep_or_abort(const cmd_sink_t *s, uint32_t ms)
+{
+    while (ms > 0) {
+        if (abort_requested(s)) {
+            return true;
+        }
+        uint32_t slice = (ms < ABORT_POLL_MS) ? ms : ABORT_POLL_MS;
+        vTaskDelay(pdMS_TO_TICKS(slice));
+        ms -= slice;
+    }
+    return abort_requested(s);
+}
+
+/* Runs an already-started FD move to completion.
+ *
+ * The servo answers an FD command twice: status 1 when the move starts and
+ * status 2 when it finishes. Rather than blocking on the second reply, poll
+ * for it so that a stop arriving mid-move can take over. On abort we halt the
+ * motor here and then swallow whatever the interrupted move reports, so the
+ * next command does not read a stale frame as its own reply.
+ */
+static void await_move(const cmd_sink_t *s, const char *what, uint32_t timeout_ms)
+{
+    uint32_t polls = (timeout_ms + ABORT_POLL_MS - 1) / ABORT_POLL_MS;
+    if (polls == 0) {
+        polls = 1;
+    }
+
+    for (uint32_t i = 0; i < polls; i++) {
+        if (abort_requested(s)) {
+            esp_err_t stop_err = mks_stop(g_servo);
+            mks_discard_pending(g_servo, 250);
+            if (stop_err == ESP_OK) {
+                cmd_printf(s, "OK %s aborted\r\n", what);
+            } else {
+                cmd_printf(s, "ERR %s abort: stop failed: %s\r\n",
+                           what, esp_err_to_name(stop_err));
+            }
+            return;
+        }
+
+        esp_err_t err = mks_wait_move_complete(g_servo, ABORT_POLL_MS);
+        if (err == ESP_OK) {
+            report(s, what, ESP_OK);
+            return;
+        }
+        if (err != ESP_ERR_TIMEOUT) {
+            report(s, what, err);
+            mks_discard_pending(g_servo, 100);
+            return;
+        }
+    }
+
+    cmd_printf(s, "ERR %s: no completion reply within %" PRIu32 " ms\r\n",
+               what, timeout_ms);
+    mks_discard_pending(g_servo, 100);
+}
+
+/* Starts a pulse move and tracks it to completion. */
+static void start_and_await(const cmd_sink_t *s, const char *what,
+                            mks_dir_t dir, uint8_t code, uint32_t pulses,
+                            uint32_t timeout_ms)
+{
+    if (pulses == 0) {
+        cmd_printf(s, "OK %s (zero distance, nothing to do)\r\n", what);
+        return;
+    }
+    /* A stop may have arrived between dequeuing this command and starting it.
+     * Check before commanding motion, so the motor does not twitch. */
+    if (abort_requested(s)) {
+        cmd_printf(s, "OK %s pre-empted before start\r\n", what);
+        return;
+    }
+    esp_err_t err = mks_move_pulses(g_servo, dir, code, pulses, false, 0);
+    if (err != ESP_OK) {
+        report(s, what, err);
+        return;
+    }
+    await_move(s, what, timeout_ms);
+}
+
 /* Completion timeout for a move, from its length and speed plus margin. */
 static uint32_t move_timeout_ms(float revolutions, float rpm)
 {
@@ -245,9 +335,12 @@ static void cmd_move(int argc, char **argv, const cmd_sink_t *s)
         cmd_printf(s, "ERR move: bad rpm '%s'\r\n", argv[2]);
         return;
     }
-    uint32_t timeout = move_timeout_ms(degrees / 360.0f, rpm);
     cmd_printf(s, ".. moving %.2f deg at %.1f rpm\r\n", degrees, rpm);
-    report(s, "move", mks_move_degrees(g_servo, degrees, rpm, true, timeout));
+    start_and_await(s, "move",
+                    (degrees < 0.0f) ? MKS_DIR_CCW : MKS_DIR_CW,
+                    mks_rpm_to_speed_code(g_servo, rpm),
+                    mks_degrees_to_pulses(g_servo, degrees),
+                    move_timeout_ms(degrees / 360.0f, rpm));
 }
 
 static void cmd_rev(int argc, char **argv, const cmd_sink_t *s)
@@ -262,9 +355,12 @@ static void cmd_rev(int argc, char **argv, const cmd_sink_t *s)
         cmd_printf(s, "ERR rev: bad rpm '%s'\r\n", argv[2]);
         return;
     }
-    uint32_t timeout = move_timeout_ms(revs, rpm);
     cmd_printf(s, ".. moving %.3f rev at %.1f rpm\r\n", revs, rpm);
-    report(s, "rev", mks_move_revolutions(g_servo, revs, rpm, true, timeout));
+    start_and_await(s, "rev",
+                    (revs < 0.0f) ? MKS_DIR_CCW : MKS_DIR_CW,
+                    mks_rpm_to_speed_code(g_servo, rpm),
+                    mks_degrees_to_pulses(g_servo, revs * 360.0f),
+                    move_timeout_ms(revs, rpm));
 }
 
 static void cmd_pulses(int argc, char **argv, const cmd_sink_t *s)
@@ -288,9 +384,8 @@ static void cmd_pulses(int argc, char **argv, const cmd_sink_t *s)
     float revs = (float)count / (float)mks_pulses_per_rev(g_servo);
     cmd_printf(s, ".. %ld pulses %s at code %ld (%.1f rpm)\r\n",
                count, argv[1], code, rpm);
-    report(s, "pulses", mks_move_pulses(g_servo, dir, (uint8_t)code,
-                                        (uint32_t)count, true,
-                                        move_timeout_ms(revs, rpm)));
+    start_and_await(s, "pulses", dir, (uint8_t)code, (uint32_t)count,
+                    move_timeout_ms(revs, rpm));
 }
 
 static void cmd_run(int argc, char **argv, const cmd_sink_t *s)
@@ -573,20 +668,25 @@ static void cmd_demo(int argc, char **argv, const cmd_sink_t *s)
 {
     (void)argc; (void)argv;
     const uint32_t timeout = move_timeout_ms(DEMO_REVOLUTIONS, DEMO_RPM);
+    const uint8_t code = mks_rpm_to_speed_code(g_servo, DEMO_RPM);
+    const uint32_t pulses = mks_degrees_to_pulses(g_servo, DEMO_REVOLUTIONS * 360.0f);
 
     cmd_printf(s, ".. %+.2f rev cw\r\n", DEMO_REVOLUTIONS);
-    esp_err_t err = mks_move_revolutions(g_servo, DEMO_REVOLUTIONS, DEMO_RPM,
-                                         true, timeout);
-    if (err != ESP_OK) { report(s, "demo", err); return; }
+    start_and_await(s, "demo cw", MKS_DIR_CW, code, pulses, timeout);
+    if (abort_requested(s)) { cmd_printf(s, "OK demo aborted\r\n"); return; }
 
     cmd_printf(s, ".. %+.2f rev ccw\r\n", -DEMO_REVOLUTIONS);
-    err = mks_move_revolutions(g_servo, -DEMO_REVOLUTIONS, DEMO_RPM, true, timeout);
-    if (err != ESP_OK) { report(s, "demo", err); return; }
+    start_and_await(s, "demo ccw", MKS_DIR_CCW, code, pulses, timeout);
+    if (abort_requested(s)) { cmd_printf(s, "OK demo aborted\r\n"); return; }
 
     cmd_printf(s, ".. constant speed for 3 s\r\n");
-    err = mks_run_rpm(g_servo, MKS_DIR_CW, DEMO_RPM);
+    esp_err_t err = mks_run_rpm(g_servo, MKS_DIR_CW, DEMO_RPM);
     if (err != ESP_OK) { report(s, "demo", err); return; }
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    if (sleep_or_abort(s, 3000)) {
+        mks_stop(g_servo);
+        cmd_printf(s, "OK demo aborted\r\n");
+        return;
+    }
     report(s, "demo", mks_stop(g_servo));
 }
 
@@ -704,6 +804,26 @@ static void cmd_help(int argc, char **argv, const cmd_sink_t *s)
 void servo_cmd_init(mks_t *servo)
 {
     g_servo = servo;
+}
+
+/* True if the first word of `line` is exactly `word`, ignoring case. */
+static bool leading_word_is(const char *line, const char *word)
+{
+    while (*line == ' ' || *line == '\t') {
+        line++;
+    }
+    size_t n = strlen(word);
+    if (strncasecmp(line, word, n) != 0) {
+        return false;
+    }
+    char after = line[n];
+    return after == '\0' || after == ' ' || after == '\t' ||
+           after == '\r' || after == '\n' || after == '#';
+}
+
+bool servo_cmd_is_urgent(const char *line)
+{
+    return leading_word_is(line, "stop") || leading_word_is(line, "disable");
 }
 
 void servo_cmd_dispatch(int argc, char **argv, const cmd_sink_t *sink)
