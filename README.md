@@ -90,7 +90,7 @@ parse them.
 | `pulses <cw\|ccw> <code> <n>` | raw pulse move |
 | `run <cw\|ccw> <rpm>` / `speedcode <cw\|ccw> <0-127>` | constant speed |
 | `save [on\|off]` | store the current speed as power-on behaviour |
-| `zero <go\|here\|mode\|speed\|dir> [arg]` | homing |
+| `zero [go\|here\|mode\|speed\|dir] [arg]` | homing; bare `zero` prints the setup order |
 | `protect [clear]` | stall protection |
 | `set <param> <value>` | `current mstep mode dir mottype protect mplyer screenoff kp ki kd acc maxt addr baud` |
 | `cal` / `restore` | calibrate (unloaded), factory reset |
@@ -104,6 +104,23 @@ be pasted in.
 The `set` commands write the servo's EEPROM — use them for commissioning, not in
 a loop. `set addr` and `set baud` also re-point this side of the link so the
 session keeps working; edit `servo_config.h` to make the change survive a reboot.
+
+### Homing
+
+`zero go` on a fresh servo fails with status 0. Per the manual, "Goto 0" needs
+`0_Mode` set to something other than `Disable` *and* a zero point already stored,
+and `0_Mode` defaults to `Disable`. Set it up once:
+
+```
+servo> zero mode dir        # or 'near' for the shortest path
+.. the servo will now home on every power-on
+servo> zero here            # store the current position as zero
+servo> zero go
+```
+
+Once `0_Mode` is not `Disable` the servo also homes by itself at every power-on —
+`zero mode off` turns that back off. `zero go` returns as soon as the servo
+accepts it and homes on its own, so poll `read angle` to see it arrive.
 
 If the servo does not answer at boot, the firmware prints a wiring/config
 checklist and still starts the console, so you can probe by hand with `raw`.

@@ -155,6 +155,8 @@ static void await_move(const cmd_sink_t *s, const char *what, uint32_t timeout_m
 
     cmd_printf(s, "ERR %s: no completion reply within %" PRIu32 " ms\r\n",
                what, timeout_ms);
+    cmd_printf(s, ".. the servo accepted the move but never reported finishing;"
+                  " check 'read en' and 'read protect'\r\n");
     mks_discard_pending(g_servo, 100);
 }
 
@@ -173,9 +175,16 @@ static void start_and_await(const cmd_sink_t *s, const char *what,
         cmd_printf(s, "OK %s pre-empted before start\r\n", what);
         return;
     }
-    esp_err_t err = mks_move_pulses(g_servo, dir, code, pulses, false, 0);
+    mks_run_status_t status = MKS_RUN_FAIL;
+    esp_err_t err = mks_start_move_pulses(g_servo, dir, code, pulses, &status);
     if (err != ESP_OK) {
         report(s, what, err);
+        return;
+    }
+    /* A short move can be over before it answers, and then there is no second
+     * reply to wait for. */
+    if (status == MKS_RUN_COMPLETE) {
+        report(s, what, ESP_OK);
         return;
     }
     await_move(s, what, timeout_ms);
@@ -442,17 +451,44 @@ static void cmd_save(int argc, char **argv, const cmd_sink_t *s)
 /* Homing                                                              */
 /* ------------------------------------------------------------------ */
 
+/* Per the manual, "Goto 0" requires 0_Mode != Disable and a "Set 0" already
+ * done, and "Set 0" itself requires 0_Mode != Disable. 0_Mode defaults to
+ * Disable, so a bare 'zero go' is rejected with status 0 on a fresh servo. */
+static void zero_sequence_hint(const cmd_sink_t *s)
+{
+    cmd_printf(s, ".. homing must be set up first, in this order:\r\n");
+    cmd_printf(s, "     zero mode <dir|near>   sets 0_Mode (default: Disable)\r\n");
+    cmd_printf(s, "     zero here              sets 0_Point, needs a mode first\r\n");
+    cmd_printf(s, "     zero go                homes\r\n");
+    cmd_printf(s, ".. optional: zero speed <0-4> (0 fastest), zero dir <cw|ccw>\r\n");
+}
+
 static void cmd_zero(int argc, char **argv, const cmd_sink_t *s)
 {
+    if (argc < 2) {
+        zero_sequence_hint(s);
+        cmd_printf(s, "OK zero\r\n");
+        return;
+    }
     const char *sub = argv[1];
 
     if (strcasecmp(sub, "go") == 0) {
         cmd_printf(s, ".. homing\r\n");
-        report(s, "zero go", mks_goto_zero(g_servo, 30000));
+        esp_err_t err = mks_goto_zero(g_servo, 30000);
+        report(s, "zero go", err);
+        if (err == ESP_OK) {
+            cmd_printf(s, ".. the servo homes on its own; poll 'read angle'\r\n");
+        } else {
+            zero_sequence_hint(s);
+        }
         return;
     }
     if (strcasecmp(sub, "here") == 0) {
-        report(s, "zero here", mks_set_zero_here(g_servo));
+        esp_err_t err = mks_set_zero_here(g_servo);
+        report(s, "zero here", err);
+        if (err != ESP_OK) {
+            cmd_printf(s, ".. 0_Mode must not be Disable: run 'zero mode dir' first\r\n");
+        }
         return;
     }
     if (strcasecmp(sub, "mode") == 0) {
@@ -462,7 +498,12 @@ static void cmd_zero(int argc, char **argv, const cmd_sink_t *s)
         else if (strcasecmp(argv[2], "dir") == 0)  mode = MKS_ZERO_MODE_DIR;
         else if (strcasecmp(argv[2], "near") == 0) mode = MKS_ZERO_MODE_NEAR;
         else { cmd_printf(s, "ERR zero mode: off|dir|near\r\n"); return; }
-        report(s, "zero mode", mks_set_zero_mode(g_servo, mode));
+        esp_err_t err = mks_set_zero_mode(g_servo, mode);
+        report(s, "zero mode", err);
+        if (err == ESP_OK && mode != MKS_ZERO_MODE_DISABLE) {
+            cmd_printf(s, ".. the servo will now home on every power-on\r\n");
+            cmd_printf(s, ".. next: 'zero here' to set the zero point\r\n");
+        }
         return;
     }
     if (strcasecmp(sub, "speed") == 0) {
@@ -773,7 +814,7 @@ static const cmd_entry_t kCommands[] = {
     { "run",       3, cmd_run,       "run <cw|ccw> <rpm>         constant speed" },
     { "speedcode", 3, cmd_speedcode, "speedcode <cw|ccw> <0-127> constant speed, raw" },
     { "save",      1, cmd_save,      "save [on|off]              store speed as power-on" },
-    { "zero",      2, cmd_zero,      "zero <go|here|mode|speed|dir> [arg]" },
+    { "zero",      1, cmd_zero,      "zero [go|here|mode|speed|dir] [arg]  bare 'zero' shows the setup order" },
     { "protect",   1, cmd_protect,   "protect [clear]            stall protection" },
     { "set",       2, cmd_set,       "set <param> <value>        see below" },
     { "cal",       1, cmd_cal,       "cal                        calibrate, unloaded" },

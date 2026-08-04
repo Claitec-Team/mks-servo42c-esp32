@@ -268,6 +268,16 @@ esp_err_t mks_move_pulses(mks_t *h, mks_dir_t dir, uint8_t speed_code,
                           uint32_t pulses, bool wait_complete,
                           uint32_t move_timeout_ms);
 
+/* 0xFD, without waiting for anything beyond the servo's first reply, whose
+ * status lands in `status_out`.
+ *
+ * Callers that poll for completion themselves must use this rather than
+ * mks_move_pulses(): a short move can answer MKS_RUN_COMPLETE straight away,
+ * and then no second reply is coming. Waiting for one would hang until timeout.
+ */
+esp_err_t mks_start_move_pulses(mks_t *h, mks_dir_t dir, uint8_t speed_code,
+                                uint32_t pulses, mks_run_status_t *status_out);
+
 /* Waits for the trailing "run complete" reply of a non-blocking
  * mks_move_pulses(). Returns ESP_ERR_TIMEOUT if it does not arrive, without
  * consuming anything, so it doubles as a poll when given a short timeout. */

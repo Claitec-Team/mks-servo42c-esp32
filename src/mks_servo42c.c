@@ -711,6 +711,21 @@ esp_err_t mks_move_pulses(mks_t *h, mks_dir_t dir, uint8_t speed_code,
                           uint32_t pulses, bool wait_complete,
                           uint32_t move_timeout_ms)
 {
+    mks_run_status_t status = MKS_RUN_FAIL;
+    esp_err_t err = mks_start_move_pulses(h, dir, speed_code, pulses, &status);
+    if (err != ESP_OK) {
+        return err;
+    }
+    /* Nothing more will arrive if the servo already reported completion. */
+    if (status == MKS_RUN_COMPLETE || !wait_complete) {
+        return ESP_OK;
+    }
+    return mks_wait_move_complete(h, move_timeout_ms);
+}
+
+esp_err_t mks_start_move_pulses(mks_t *h, mks_dir_t dir, uint8_t speed_code,
+                                uint32_t pulses, mks_run_status_t *status_out)
+{
     uint8_t data[5];
     data[0] = (uint8_t)((speed_code & 0x7F) | (dir == MKS_DIR_CCW ? 0x80 : 0x00));
     data[1] = (uint8_t)(pulses >> 24);
@@ -724,18 +739,14 @@ esp_err_t mks_move_pulses(mks_t *h, mks_dir_t dir, uint8_t speed_code,
     if (err != ESP_OK) {
         return err;
     }
+    if (status_out != NULL) {
+        *status_out = (mks_run_status_t)status;
+    }
     if (status == MKS_RUN_FAIL) {
         ESP_LOGE(TAG, "move rejected: is the servo in CR_UART mode and enabled?");
         return ESP_FAIL;
     }
-    /* A zero-pulse move can report completion immediately. */
-    if (status == MKS_RUN_COMPLETE) {
-        return ESP_OK;
-    }
-    if (!wait_complete) {
-        return ESP_OK;
-    }
-    return mks_wait_move_complete(h, move_timeout_ms);
+    return ESP_OK;
 }
 
 esp_err_t mks_move_degrees(mks_t *h, float degrees, float rpm,
