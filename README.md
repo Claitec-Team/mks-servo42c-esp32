@@ -53,21 +53,86 @@ pio device monitor       # log console, 115200 baud
 The monitor's 115200 baud is the ESP-IDF console on UART0 and is unrelated to the
 19200 baud servo link on UART2.
 
-## What the demo does
+## Control console
 
-`src/main.c` probes the link, prints the servo state, enables the motor, then loops:
+`src/main.c` brings the link up, then hands over to an interactive console on the
+USB serial port. Open it with `pio device monitor` and type `help`.
 
-1. one revolution clockwise, waiting for the "run complete" reply
-2. one revolution counter-clockwise
-3. three seconds of constant-speed rotation, then stop
+```
+servo> info
+link      UART2 TX=GPIO19 RX=GPIO18 38400 baud addr 0xE0
+motor     1.8 deg/step, MStep 16
+geometry  3200 pulses/rev
+speed     code 1 = 9.375 rpm, code 127 = 1190.6 rpm
+OK info
 
-after each step it reads back encoder, shaft angle, angle error, pulse count,
-En-pin state and stall-protection state.
+servo> enable 1
+OK enable
+servo> move 90
+.. moving 90.00 deg at 60.0 rpm
+OK move
+servo> run ccw 120
+.. running ccw at 121.9 rpm (code 13)
+OK run
+servo> stop
+OK stop
+```
 
-Speed and distance come from `DEMO_RPM` / `DEMO_REVOLUTIONS` in `servo_config.h`.
+Every reply starts with `OK`, `ERR` or `..` (progress), so a remote client can
+parse them.
 
-If the servo does not answer, the demo prints a wiring/config checklist and stops
-rather than driving blind.
+| Command | Purpose |
+| ------- | ------- |
+| `help` / `info` / `status` | command list, local geometry, full readback |
+| `read <encoder\|angle\|error\|pulses\|en\|protect>` | one field |
+| `enable [0\|1]` / `disable` / `stop` | motor power and stopping |
+| `move <deg> [rpm]` / `rev <revs> [rpm]` | relative positioning, blocks until done |
+| `pulses <cw\|ccw> <code> <n>` | raw pulse move |
+| `run <cw\|ccw> <rpm>` / `speedcode <cw\|ccw> <0-127>` | constant speed |
+| `save [on\|off]` | store the current speed as power-on behaviour |
+| `zero <go\|here\|mode\|speed\|dir> [arg]` | homing |
+| `protect [clear]` | stall protection |
+| `set <param> <value>` | `current mstep mode dir mottype protect mplyer screenoff kp ki kd acc maxt addr baud` |
+| `cal` / `restore` | calibrate (unloaded), factory reset |
+| `demo` | one automated cycle: 1 rev CW, 1 rev CCW, 3 s constant speed |
+| `raw <cmd> [data..] [rx=n]` | arbitrary frame, for commands not wrapped |
+
+Numbers accept hex (`set kp 0x120`) as well as decimal. Negative degrees or
+revolutions run counter-clockwise. `#` starts a comment, so command scripts can
+be pasted in.
+
+The `set` commands write the servo's EEPROM — use them for commissioning, not in
+a loop. `set addr` and `set baud` also re-point this side of the link so the
+session keeps working; edit `servo_config.h` to make the change survive a reboot.
+
+If the servo does not answer at boot, the firmware prints a wiring/config
+checklist and still starts the console, so you can probe by hand with `raw`.
+
+## Adding a WiFi transport
+
+The command layer is deliberately transport-agnostic. `servo_cmd.c` never touches
+a UART: a transport supplies a `cmd_sink_t` (one `write(ctx, text)` callback) and
+calls `servo_cmd_execute_line()`. `console_serial.c` is the UART0 implementation
+and is about 100 lines; a TCP or HTTP handler would look the same:
+
+```c
+static void tcp_write(void *ctx, const char *text) { send(*(int *)ctx, text, strlen(text), 0); }
+
+int client_fd = /* accepted socket */;
+cmd_sink_t sink = { .write = tcp_write, .ctx = &client_fd };
+servo_cmd_execute_line(line, &sink);
+```
+
+Two things to settle when that lands:
+
+- **Serialisation.** `mks_t` is not thread-safe — one request/reply exchange must
+  finish before the next starts. With more than one transport, funnel commands
+  through a single servo-owning task and a queue rather than calling
+  `servo_cmd_execute_line()` from each connection.
+- **Blocking moves.** `move`/`rev` wait for the servo's "run complete" reply, so a
+  long move holds the caller for its duration and `stop` cannot get through.
+  A command queue fixes this too, by letting the servo task poll for completion
+  while still accepting `stop`.
 
 ## Using the driver
 
@@ -192,13 +257,16 @@ goes to the ESP32's RX pin. Use the header's own `G` as the ground reference.
 ## Layout
 
 ```
-platformio.ini            build config, env:esp32dev
+platformio.ini            build config: env:esp32dev and env:diag
 sdkconfig.defaults        ESP-IDF options (4 MB flash, full printf, console on UART0)
 CMakeLists.txt            IDF project entry point
 include/servo_config.h    wiring, baud, address, motor and demo settings
 include/mks_servo42c.h    driver API
 src/mks_servo42c.c        protocol implementation
-src/main.c                demo application
+src/servo_cmd.c           text command layer, transport-agnostic
+src/console_serial.c      UART0 transport for the command layer
+src/diag.c                link diagnostics (env:diag only)
+src/main.c                startup: bring up the link, start the console
 ```
 
 ## References
