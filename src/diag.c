@@ -22,6 +22,43 @@ static const char *TAG = "diag";
 static const int kBauds[] = { 9600, 19200, 25000, 38400, 57600, 115200 };
 #define N_BAUDS (sizeof(kBauds) / sizeof(kBauds[0]))
 
+/* What phases 2 and 3 discovered, so later phases and the summary can use it. */
+static bool    g_link_ok;
+static int     g_found_baud;
+static uint8_t g_found_addr;
+
+/* True if `bytes` is a well-formed reply: our address first, CHECKSUM-8 last. */
+static bool frame_is_valid(const uint8_t *bytes, size_t n, uint8_t addr)
+{
+    if (n < 3 || bytes[0] != addr) {
+        return false;
+    }
+    uint32_t sum = 0;
+    for (size_t i = 0; i + 1 < n; i++) {
+        sum += bytes[i];
+    }
+    return bytes[n - 1] == (uint8_t)(sum & 0xFF);
+}
+
+/* Decodes and prints a reply, so a valid frame is obvious at a glance. */
+static void report_reply(const uint8_t *bytes, size_t n, uint8_t addr)
+{
+    if (!frame_is_valid(bytes, n, addr)) {
+        ESP_LOGW(TAG, "    -> not a valid frame for addr 0x%02X "
+                      "(wrong address or bad checksum)", addr);
+        return;
+    }
+    if (n == 8) {
+        int32_t carry = (int32_t)(((uint32_t)bytes[1] << 24) | ((uint32_t)bytes[2] << 16) |
+                                  ((uint32_t)bytes[3] << 8) | (uint32_t)bytes[4]);
+        uint16_t value = (uint16_t)(((uint16_t)bytes[5] << 8) | bytes[6]);
+        ESP_LOGI(TAG, "    -> valid frame, encoder carry=%" PRId32 " value=%u",
+                 carry, value);
+    } else {
+        ESP_LOGI(TAG, "    -> valid frame (%u bytes)", (unsigned)n);
+    }
+}
+
 static void hexdump(const char *prefix, const uint8_t *bytes, size_t n)
 {
     char line[DIAG_RX_CAP * 3 + 1];
@@ -102,6 +139,12 @@ static void phase_baud_sweep(void)
                 snprintf(prefix, sizeof(prefix), "  %6d %s -> %d bytes: ",
                          kBauds[i], framing, n);
                 hexdump(prefix, rx, (size_t)n);
+                report_reply(rx, (size_t)n, SERVO_ADDRESS);
+                if (!g_link_ok && frame_is_valid(rx, (size_t)n, SERVO_ADDRESS)) {
+                    g_link_ok = true;
+                    g_found_baud = kBauds[i];
+                    g_found_addr = SERVO_ADDRESS;
+                }
             } else {
                 ESP_LOGI(TAG, "  %6d %s -> silence", kBauds[i], framing);
             }
@@ -130,6 +173,12 @@ static void phase_address_sweep(void)
             char prefix[48];
             snprintf(prefix, sizeof(prefix), "  addr 0x%02X -> %d bytes: ", addr, n);
             hexdump(prefix, rx, (size_t)n);
+            report_reply(rx, (size_t)n, addr);
+            if (!g_link_ok && frame_is_valid(rx, (size_t)n, addr)) {
+                g_link_ok = true;
+                g_found_baud = SERVO_BAUD_RATE;
+                g_found_addr = addr;
+            }
         }
     }
     if (hits == 0) {
@@ -145,7 +194,9 @@ static void phase_loopback(void)
     ESP_LOGI(TAG, "== phase 4: loopback on GPIO%d -> GPIO%d ==",
              SERVO_TX_GPIO, SERVO_RX_GPIO);
 
-    static const uint8_t pattern[] = { 0xE0, 0x30, 0x10, 0x55, 0xAA };
+    /* No byte may fall in 0xE0..0xE9, or a connected servo would treat this as
+     * a command frame and its reply would masquerade as looped-back data. */
+    static const uint8_t pattern[] = { 0x55, 0xAA, 0x5A, 0xA5, 0x0F };
     uart_set_baudrate(DIAG_UART, SERVO_BAUD_RATE);
     uart_flush_input(DIAG_UART);
     uart_write_bytes(DIAG_UART, pattern, sizeof(pattern));
@@ -158,7 +209,8 @@ static void phase_loopback(void)
                       "off-board", DIAG_UART);
     } else if (n > 0) {
         hexdump("  PARTIAL, got: ", rx, (size_t)n);
-        ESP_LOGW(TAG, "  bytes came back but corrupted: check the jumper and baud rate");
+        ESP_LOGW(TAG, "  bytes came back but do not match what was sent:");
+        ESP_LOGW(TAG, "  check the jumper and that both ends agree on the baud rate");
     } else {
         ESP_LOGW(TAG, "  FAIL: nothing looped back.");
         ESP_LOGW(TAG, "  With the jumper fitted this means GPIO%d/GPIO%d cannot be",
@@ -193,12 +245,30 @@ void diag_run(void)
     phase_listen();
     phase_baud_sweep();
     phase_address_sweep();
-    phase_loopback();
+
+    /* The loopback only tells us something when the link is still unproven, and
+     * with the servo attached its reply would look like looped-back data. */
+    if (g_link_ok) {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "== phase 4: loopback skipped, the link already works ==");
+    } else {
+        phase_loopback();
+    }
 
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "===== diagnostics done =====");
-    ESP_LOGI(TAG, "A reply in phase 2 or 3 tells you the working baud/address:");
-    ESP_LOGI(TAG, "put them in include/servo_config.h and rebuild the demo.");
+    if (g_link_ok) {
+        ESP_LOGI(TAG, "LINK OK at %d baud, addr 0x%02X.", g_found_baud, g_found_addr);
+        if (g_found_baud != SERVO_BAUD_RATE || g_found_addr != SERVO_ADDRESS) {
+            ESP_LOGW(TAG, "servo_config.h says %d baud / 0x%02X: update it to match.",
+                     SERVO_BAUD_RATE, SERVO_ADDRESS);
+        } else {
+            ESP_LOGI(TAG, "servo_config.h already matches. Flash the demo:");
+            ESP_LOGI(TAG, "  pio run -e esp32dev -t upload");
+        }
+    } else {
+        ESP_LOGW(TAG, "No valid reply. Check wiring, then the baud/address menus.");
+    }
 
     uart_driver_delete(DIAG_UART);
 }

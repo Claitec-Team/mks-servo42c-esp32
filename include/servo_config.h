@@ -12,16 +12,19 @@
  * UART2 is used so that UART0 stays free for flashing and the log console
  * over USB.
  *
- *   ESP32 GPIO17 (TX)  ->  SERVO42C RX
- *   ESP32 GPIO16 (RX)  <-  SERVO42C TX
- *   ESP32 GND          <-> SERVO42C GND     (required, common ground)
+ * Any GPIO works: the ESP32 routes UART signals through its GPIO matrix, so
+ * changing these two defines is all that a pin move requires.
+ *
+ *   ESP32 GPIO19 (TX)  ->  SERVO42C Rx
+ *   ESP32 GPIO18 (RX)  <-  SERVO42C Tx
+ *   ESP32 GND          <-> SERVO42C G       (required, common ground)
  */
 #define SERVO_UART_PORT   2
-#define SERVO_TX_GPIO     17  /* ESP32 TX -> servo RX */
-#define SERVO_RX_GPIO     16  /* ESP32 RX <- servo TX */
+#define SERVO_TX_GPIO     19  /* ESP32 TX -> servo Rx (servo's input) */
+#define SERVO_RX_GPIO     18  /* ESP32 RX <- servo Tx (servo's output) */
 
 /* Menu -> UartBaud on the servo. Must match exactly. */
-#define SERVO_BAUD_RATE   19200
+#define SERVO_BAUD_RATE   38400
 
 /* Menu -> UartAddr on the servo. Valid range 0xE0 .. 0xE9. */
 #define SERVO_ADDRESS     0xE0
