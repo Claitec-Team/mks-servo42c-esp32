@@ -16,6 +16,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -31,6 +32,41 @@
 static const char *TAG = "app";
 
 static mks_t servo;
+
+/* Says why we last rebooted. A brownout leaves no panic output, because it is
+ * handled by an interrupt that resets the chip in software, so without this it
+ * looks like a mysterious crash. */
+static void log_reset_reason(void)
+{
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:
+        ESP_LOGI(TAG, "reset: power-on");
+        break;
+    case ESP_RST_SW:
+        ESP_LOGI(TAG, "reset: software restart");
+        break;
+    case ESP_RST_PANIC:
+        ESP_LOGW(TAG, "reset: panic or exception on the previous run");
+        break;
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+        ESP_LOGW(TAG, "reset: watchdog");
+        break;
+    case ESP_RST_BROWNOUT:
+        ESP_LOGE(TAG, "reset: BROWNOUT - the 3.3 V rail sagged, this is a power");
+        ESP_LOGE(TAG, "  problem, not a firmware one. Enabling WiFi makes it far");
+        ESP_LOGE(TAG, "  more likely because RF calibration draws a large spike.");
+        ESP_LOGE(TAG, "  Try: a different USB port or a shorter/thicker cable, a");
+        ESP_LOGE(TAG, "  bulk capacitor (470-1000 uF) across 3V3-GND at the module,");
+        ESP_LOGE(TAG, "  a powered hub or 5 V supply on VIN, or lower");
+        ESP_LOGE(TAG, "  SERVO_WIFI_MAX_TX_POWER in servo_config.h.");
+        break;
+    default:
+        ESP_LOGI(TAG, "reset: reason %d", (int)esp_reset_reason());
+        break;
+    }
+}
 
 /* Confirms the link is alive before we accept commands. */
 static esp_err_t probe_servo(void)
@@ -73,6 +109,8 @@ void app_main(void)
     diag_run();
     return;
 #endif
+
+    log_reset_reason();
 
     const mks_config_t cfg = {
         .uart_num         = SERVO_UART_PORT,

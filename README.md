@@ -229,6 +229,32 @@ printf 'enable 1\nmove 90\nread angle\n' | nc -q1 192.168.1.57 3333
 > forward the port through a router. The credentials are also compiled into the
 > firmware image, so treat `firmware.bin` as a secret too.
 
+### If it reboots as soon as WiFi is enabled
+
+Powering up the radio is the largest current spike in the whole boot, and a board
+fed through a thin USB cable can sag enough to brown out. The signature is a
+reboot during PHY calibration, before WiFi ever associates, with no panic output:
+
+```
+W (702) phy_init: failed to load RF calibration data (0xffffffff), falling back to full calibration
+ets Jun  8 2016 00:22:57
+rst:0x3 (SW_RESET),boot:0x33 (SPI_FAST_FLASH_BOOT)
+```
+
+There is no backtrace because a brownout is not a panic: it is handled by an
+interrupt that resets the chip in software, hence `SW_RESET`. The firmware names
+it on the next boot:
+
+```
+E (562) app: reset: BROWNOUT - the 3.3 V rail sagged, this is a power problem...
+```
+
+In order of effectiveness: a better supply (powered hub, or 5 V on VIN), a
+shorter or thicker USB cable, a 470–1000 µF bulk capacitor across 3V3–GND at the
+module, and lowering `SERVO_WIFI_MAX_TX_POWER` in `servo_config.h` to shrink the
+spike. Do **not** disable `CONFIG_ESP_BROWNOUT_DET` to silence it — that lets the
+chip keep running below its safe voltage, which corrupts flash.
+
 ### Adding another transport
 
 Implement one `write` callback and submit; everything else is inherited:
@@ -362,6 +388,7 @@ A reply in phase 2 or 3 gives you the working baud rate and address; put them in
 | Motor stalls or skips | current too low (`mks_set_current_ma`), acceleration too aggressive (`mks_set_acceleration`), or supply voltage too low |
 | Stall protection keeps tripping | clear with `mks_release_protect()`; run `Cal` and check the mechanics |
 | `ESP_ERR_INVALID_CRC` occasionally | long or unshielded UART wiring, or a ground loop |
+| Reboots during PHY calibration once WiFi is enabled | 3.3 V brownout — see below |
 | Nothing at all, servo `Tx` sits at 0 V | wrong header — the UART pins are the 4-pin `3V3 / G / Tx / Rx` group, not `Com / En / Stp / Dir` |
 | Nothing at all on GPIO16/17 | ESP32-WROVER modules wire GPIO16/17 to the PSRAM chip; use different pins (phase 4 of the diagnostics confirms this) |
 

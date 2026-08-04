@@ -79,6 +79,19 @@
 /* Advertised over DHCP, so you can use it instead of hunting for the IP. */
 #define SERVO_WIFI_HOSTNAME  "mks-servo42c"
 
+/*
+ * Transmit power cap, in quarter-dBm: 8 = 2 dBm, 52 = 13 dBm, 84 = 20 dBm.
+ * 0 leaves the driver default (20 dBm, the maximum).
+ *
+ * Turning the radio on draws a large current spike, and on a board powered
+ * through a thin USB cable that can sag the 3.3 V rail far enough to brown out
+ * the chip - which shows up as a reset during PHY calibration, before WiFi ever
+ * associates. Capping the power shrinks the spike; 52 (13 dBm) is still plenty
+ * for a local network. The real fix is a better supply: see the brownout
+ * message the firmware prints on the next boot.
+ */
+#define SERVO_WIFI_MAX_TX_POWER  0
+
 /* TCP port for the command interface: `nc <ip> 3333`. */
 #define SERVO_TCP_PORT       3333
 

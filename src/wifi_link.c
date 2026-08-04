@@ -111,6 +111,19 @@ esp_err_t wifi_link_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+#if SERVO_WIFI_MAX_TX_POWER > 0
+    /* Must come after esp_wifi_start(). Trades range for a smaller current
+     * spike, which matters on a board with a marginal supply. */
+    err = esp_wifi_set_max_tx_power(SERVO_WIFI_MAX_TX_POWER);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "tx power capped at %d.%02d dBm",
+                 SERVO_WIFI_MAX_TX_POWER / 4,
+                 (SERVO_WIFI_MAX_TX_POWER % 4) * 25);
+    } else {
+        ESP_LOGW(TAG, "esp_wifi_set_max_tx_power failed: %s", esp_err_to_name(err));
+    }
+#endif
+
     ESP_LOGI(TAG, "connecting to \"%s\"", SERVO_WIFI_SSID);
     return ESP_OK;
 }
