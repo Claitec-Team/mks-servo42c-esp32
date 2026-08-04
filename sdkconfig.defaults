@@ -1,0 +1,13 @@
+# Match the 4 MB flash on a standard ESP32 devkit (the ESP-IDF default is 2 MB,
+# which makes PlatformIO warn about a size mismatch).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Full printf formatting so that %f in the log output works.
+CONFIG_NEWLIB_NANO_FORMAT=n
+
+# Keep the log console on UART0 at the rate platformio.ini monitors.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
