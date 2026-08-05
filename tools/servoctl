@@ -29,7 +29,7 @@ import sys
 import threading
 
 DEFAULT_PORT = 3333
-DEFAULT_RPM = 30.0
+DEFAULT_RPM = 15.0
 MAX_RPM = 100.0
 PROMPT = "servo> "
 HISTORY_LIMIT = 2000
