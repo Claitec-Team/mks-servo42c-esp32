@@ -94,6 +94,63 @@ static bool parse_bool(const char *s, bool *out)
     return false;
 }
 
+static const char *en_state_str(mks_en_state_t st)
+{
+    switch (st) {
+    case MKS_EN_STATE_ENABLED:  return "enabled";
+    case MKS_EN_STATE_DISABLED: return "disabled";
+    default:                    return "error";
+    }
+}
+
+static const char *protect_state_str(mks_protect_state_t st)
+{
+    switch (st) {
+    case MKS_PROTECT_TRIPPED:     return "tripped";
+    case MKS_PROTECT_NOT_TRIPPED: return "ok";
+    default:                      return "error";
+    }
+}
+
+/*
+ * Refuses a motion command when the motor is not energised.
+ *
+ * A disabled motor does not move, but the servo still accepts the command and
+ * still reports "run complete", so without this check the only symptom is a
+ * shaft that never goes anywhere. Costs one short read before each move.
+ *
+ * A read that fails is not treated as a veto: a diagnostic must not block real
+ * work just because it could not run.
+ */
+static bool motor_is_energised(const cmd_sink_t *s, const char *what)
+{
+    mks_en_state_t en = MKS_EN_STATE_ERROR;
+    if (mks_read_en_state(g_servo, &en) != ESP_OK) {
+        return true;
+    }
+    if (en == MKS_EN_STATE_DISABLED) {
+        cmd_printf(s, "ERR %s: the motor is disabled, so it would not move\r\n",
+                   what);
+        cmd_printf(s, ".. run 'enable 1' first\r\n");
+        return false;
+    }
+    return true;
+}
+
+/* Reports the two states that stop a move from finishing, for when one did not.
+ * Printed rather than merely suggested, so the answer is already on screen. */
+static void report_stuck_state(const cmd_sink_t *s)
+{
+    mks_en_state_t en = MKS_EN_STATE_ERROR;
+    if (mks_read_en_state(g_servo, &en) == ESP_OK) {
+        cmd_printf(s, ".. En pin is %s\r\n", en_state_str(en));
+    }
+    mks_protect_state_t prot = MKS_PROTECT_ERROR;
+    if (mks_read_protect_state(g_servo, &prot) == ESP_OK) {
+        cmd_printf(s, ".. stall protection is %s\r\n", protect_state_str(prot));
+    }
+}
+
 /* How often a long-running command checks for a pre-empting stop. */
 #define ABORT_POLL_MS 50
 
@@ -215,7 +272,7 @@ static bool await_move(const cmd_sink_t *s, const char *what,
 
     cmd_printf(s, "ERR %s: no completion reply within %" PRIu32 " ms, and the "
                   "shaft is not where it was told to go\r\n", what, timeout_ms);
-    cmd_printf(s, ".. check 'read en' and 'read protect'\r\n");
+    report_stuck_state(s);
     return false;
 }
 
@@ -223,7 +280,8 @@ static bool await_move(const cmd_sink_t *s, const char *what,
  * finished; see await_move() for `announce_ok`. */
 static bool start_and_await(const cmd_sink_t *s, const char *what,
                             mks_dir_t dir, uint8_t code, uint32_t pulses,
-                            uint32_t timeout_ms, bool announce_ok)
+                            uint32_t timeout_ms, bool announce_ok,
+                            const char *announce)
 {
     if (pulses == 0) {
         if (announce_ok) {
@@ -237,6 +295,15 @@ static bool start_and_await(const cmd_sink_t *s, const char *what,
         cmd_printf(s, "OK %s pre-empted before start\r\n", what);
         return false;
     }
+    if (!motor_is_energised(s, what)) {
+        return false;
+    }
+    /* Only now say it is moving: announcing first and refusing second reads as
+     * a contradiction. */
+    if (announce != NULL) {
+        cmd_printf(s, ".. %s\r\n", announce);
+    }
+
     /* Note where the shaft is first, so a missing completion frame can be
      * settled by asking the encoder rather than by guessing. One extra
      * read costs a few milliseconds. */
@@ -284,24 +351,6 @@ static uint32_t move_timeout_ms(float revolutions, float rpm)
 /* ------------------------------------------------------------------ */
 /* Readback                                                            */
 /* ------------------------------------------------------------------ */
-
-static const char *en_state_str(mks_en_state_t st)
-{
-    switch (st) {
-    case MKS_EN_STATE_ENABLED:  return "enabled";
-    case MKS_EN_STATE_DISABLED: return "disabled";
-    default:                    return "error";
-    }
-}
-
-static const char *protect_state_str(mks_protect_state_t st)
-{
-    switch (st) {
-    case MKS_PROTECT_TRIPPED:     return "tripped";
-    case MKS_PROTECT_NOT_TRIPPED: return "ok";
-    default:                      return "error";
-    }
-}
 
 static void cmd_status(int argc, char **argv, const cmd_sink_t *s)
 {
@@ -423,12 +472,13 @@ static void cmd_move(int argc, char **argv, const cmd_sink_t *s)
         cmd_printf(s, "ERR move: bad rpm '%s'\r\n", argv[2]);
         return;
     }
-    cmd_printf(s, ".. moving %.2f deg at %.1f rpm\r\n", degrees, rpm);
+    char note[96];
+    snprintf(note, sizeof(note), "moving %.2f deg at %.1f rpm", degrees, rpm);
     start_and_await(s, "move",
                     (degrees < 0.0f) ? MKS_DIR_CCW : MKS_DIR_CW,
                     mks_rpm_to_speed_code(g_servo, rpm),
                     mks_degrees_to_pulses(g_servo, degrees),
-                    move_timeout_ms(degrees / 360.0f, rpm), true);
+                    move_timeout_ms(degrees / 360.0f, rpm), true, note);
 }
 
 static void cmd_rev(int argc, char **argv, const cmd_sink_t *s)
@@ -443,12 +493,13 @@ static void cmd_rev(int argc, char **argv, const cmd_sink_t *s)
         cmd_printf(s, "ERR rev: bad rpm '%s'\r\n", argv[2]);
         return;
     }
-    cmd_printf(s, ".. moving %.3f rev at %.1f rpm\r\n", revs, rpm);
+    char note[96];
+    snprintf(note, sizeof(note), "moving %.3f rev at %.1f rpm", revs, rpm);
     start_and_await(s, "rev",
                     (revs < 0.0f) ? MKS_DIR_CCW : MKS_DIR_CW,
                     mks_rpm_to_speed_code(g_servo, rpm),
                     mks_degrees_to_pulses(g_servo, revs * 360.0f),
-                    move_timeout_ms(revs, rpm), true);
+                    move_timeout_ms(revs, rpm), true, note);
 }
 
 /* Which way to turn to make the reported angle change by `delta`. */
@@ -524,12 +575,13 @@ static void cmd_goto(int argc, char **argv, const cmd_sink_t *s)
         return;
     }
 
-    cmd_printf(s, ".. at %.2f deg, target %.2f deg (mod 360): shortest path "
-                  "%+.2f deg at %.1f rpm\r\n", current, target, delta, rpm);
+    char note[128];
+    snprintf(note, sizeof(note), "at %.2f deg, target %.2f deg (mod 360): "
+             "shortest path %+.2f deg at %.1f rpm", current, target, delta, rpm);
 
     if (!start_and_await(s, "goto", dir_for_angle_delta(delta),
                          mks_rpm_to_speed_code(g_servo, rpm), pulses,
-                         move_timeout_ms(delta / 360.0f, rpm), false)) {
+                         move_timeout_ms(delta / 360.0f, rpm), false, note)) {
         return;                      /* already reported why */
     }
 
@@ -576,10 +628,11 @@ static void cmd_pulses(int argc, char **argv, const cmd_sink_t *s)
     }
     float rpm = mks_speed_code_to_rpm(g_servo, (uint8_t)code);
     float revs = (float)count / (float)mks_pulses_per_rev(g_servo);
-    cmd_printf(s, ".. %ld pulses %s at code %ld (%.1f rpm)\r\n",
-               count, argv[1], code, rpm);
+    char note[96];
+    snprintf(note, sizeof(note), "%ld pulses %s at code %ld (%.1f rpm)",
+             count, argv[1], code, rpm);
     start_and_await(s, "pulses", dir, (uint8_t)code, (uint32_t)count,
-                    move_timeout_ms(revs, rpm), true);
+                    move_timeout_ms(revs, rpm), true, note);
 }
 
 static void cmd_run(int argc, char **argv, const cmd_sink_t *s)
@@ -593,6 +646,9 @@ static void cmd_run(int argc, char **argv, const cmd_sink_t *s)
     }
     if (!parse_float(argv[2], &rpm)) {
         cmd_printf(s, "ERR run: bad rpm '%s'\r\n", argv[2]);
+        return;
+    }
+    if (!motor_is_energised(s, "run")) {
         return;
     }
     uint8_t code = mks_rpm_to_speed_code(g_servo, rpm);
@@ -612,6 +668,9 @@ static void cmd_speedcode(int argc, char **argv, const cmd_sink_t *s)
     }
     if (!parse_long(argv[2], &code) || code < 0 || code > 127) {
         cmd_printf(s, "ERR speedcode: must be 0..127\r\n");
+        return;
+    }
+    if (!motor_is_energised(s, "speedcode")) {
         return;
     }
     cmd_printf(s, ".. code %ld = %.2f rpm\r\n", code,
@@ -918,12 +977,13 @@ static void cmd_demo(int argc, char **argv, const cmd_sink_t *s)
     const uint8_t code = mks_rpm_to_speed_code(g_servo, SERVO_DEFAULT_RPM);
     const uint32_t pulses = mks_degrees_to_pulses(g_servo, DEMO_REVOLUTIONS * 360.0f);
 
-    cmd_printf(s, ".. %+.2f rev cw\r\n", DEMO_REVOLUTIONS);
-    start_and_await(s, "demo cw", MKS_DIR_CW, code, pulses, timeout, true);
+    char note[64];
+    snprintf(note, sizeof(note), "%+.2f rev cw", DEMO_REVOLUTIONS);
+    start_and_await(s, "demo cw", MKS_DIR_CW, code, pulses, timeout, true, note);
     if (abort_requested(s)) { cmd_printf(s, "OK demo aborted\r\n"); return; }
 
-    cmd_printf(s, ".. %+.2f rev ccw\r\n", -DEMO_REVOLUTIONS);
-    start_and_await(s, "demo ccw", MKS_DIR_CCW, code, pulses, timeout, true);
+    snprintf(note, sizeof(note), "%+.2f rev ccw", -DEMO_REVOLUTIONS);
+    start_and_await(s, "demo ccw", MKS_DIR_CCW, code, pulses, timeout, true, note);
     if (abort_requested(s)) { cmd_printf(s, "OK demo aborted\r\n"); return; }
 
     cmd_printf(s, ".. constant speed for 3 s\r\n");

@@ -247,12 +247,38 @@ servo> move 20
 OK move (position reached; the servo sent no completion frame)
 ```
 
+### A disabled motor
+
+A disabled motor ignores every move while the servo still acknowledges it, so
+this used to show up only as a shaft that would not turn. Motion commands now
+check the En pin first and refuse rather than pretend:
+
+```
+servo> move 10
+ERR move: the motor is disabled, so it would not move
+.. run 'enable 1' first
+```
+
+Startup says it too, so it is visible before you try anything:
+
+```
+W (572) app: the motor is DISABLED: moves will do nothing until you run 'enable 1'
+```
+
+The check costs one short read before each move, and covers `move`, `rev`,
+`pulses`, `goto`, `run`, `speedcode` and `demo`. An En read that *fails* is not
+treated as a veto — a diagnostic that cannot run is not evidence of a problem.
+
 If the shaft did *not* arrive, that is still a failure and still reported:
 
 ```
 ERR move: no completion reply within 928 ms, and the shaft is not where it was told to go
-.. check 'read en' and 'read protect'
+.. En pin is enabled
+.. stall protection is tripped
 ```
+
+The En and protection states are read and printed at that point rather than
+merely suggested, so the likely cause is already on screen.
 
 The comparison is by magnitude, so it does not depend on
 `SERVO_ANGLE_INCREASES_CW`. The timeout margin is deliberately small (15% of the

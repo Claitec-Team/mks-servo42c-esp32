@@ -2,8 +2,8 @@
  * MKS SERVO42C control firmware for ESP32 (ESP-IDF).
  *
  * Wiring (see include/servo_config.h):
- *   ESP32 GPIO19 (TX)  ->  SERVO42C Rx
- *   ESP32 GPIO18 (RX)  <-  SERVO42C Tx
+ *   ESP32 GPIO32 (TX)  ->  SERVO42C Rx
+ *   ESP32 GPIO33 (RX)  <-  SERVO42C Tx
  *   ESP32 GND          <-> SERVO42C G
  *
  * The servo must be set to Mode = CR_UART for the motion commands to work.
@@ -168,6 +168,19 @@ void app_main(void)
 #if SERVO_APPLY_SETTINGS_ON_BOOT
         apply_settings();
 #endif
+    }
+
+    /* A disabled motor silently ignores every move while the servo still
+     * acknowledges it, so it is worth saying up front rather than leaving it to
+     * be discovered by a shaft that will not turn. */
+    mks_en_state_t en = MKS_EN_STATE_ERROR;
+    if (mks_read_en_state(&servo, &en) == ESP_OK) {
+        if (en == MKS_EN_STATE_DISABLED) {
+            ESP_LOGW(TAG, "the motor is DISABLED: moves will do nothing until "
+                          "you run 'enable 1'");
+        } else {
+            ESP_LOGI(TAG, "motor is enabled");
+        }
     }
 
     /* The servo task takes ownership of `servo` from here on; nothing else may
