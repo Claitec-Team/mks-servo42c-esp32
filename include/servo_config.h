@@ -20,8 +20,8 @@
  *   ESP32 GND          <-> SERVO42C G       (required, common ground)
  */
 #define SERVO_UART_PORT   2
-#define SERVO_TX_GPIO     19  /* ESP32 TX -> servo Rx (servo's input) */
-#define SERVO_RX_GPIO     18  /* ESP32 RX <- servo Tx (servo's output) */
+#define SERVO_TX_GPIO     32  /* ESP32 TX -> servo Rx (servo's input) */
+#define SERVO_RX_GPIO     33  /* ESP32 RX <- servo Tx (servo's output) */
 
 /* Menu -> UartBaud on the servo. Must match exactly. */
 #define SERVO_BAUD_RATE   38400
@@ -108,7 +108,8 @@
 #define SERVO_BOOT_CURRENT_MA         800
 
 /* Speed used by the demo moves, in RPM at the motor shaft. */
-#define DEMO_RPM                      60.0f
+/* Speed used when a move/rev command omits one, and by the demo. */
+#define SERVO_DEFAULT_RPM             30.0f
 
 /* Revolutions per demo positioning move. */
 #define DEMO_REVOLUTIONS              1.0f

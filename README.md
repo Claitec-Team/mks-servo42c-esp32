@@ -69,7 +69,7 @@ OK info
 servo> enable 1
 OK enable
 servo> move 90
-.. moving 90.00 deg at 60.0 rpm
+.. moving 90.00 deg at 30.0 rpm
 OK move
 servo> run ccw 120
 .. running ccw at 121.9 rpm (code 13)
@@ -86,7 +86,7 @@ parse them.
 | `help` / `info` / `status` / `net` | command list, local geometry, full readback, network state |
 | `read <encoder\|angle\|error\|pulses\|en\|protect>` | one field |
 | `enable [0\|1]` / `disable` / `stop` | motor power and stopping |
-| `move <deg> [rpm]` / `rev <revs> [rpm]` | relative positioning, blocks until done |
+| `move <deg> [rpm]` / `rev <revs> [rpm]` | relative positioning, blocks until done; speed defaults to `SERVO_DEFAULT_RPM` |
 | `pulses <cw\|ccw> <code> <n>` | raw pulse move |
 | `run <cw\|ccw> <rpm>` / `speedcode <cw\|ccw> <0-127>` | constant speed |
 | `save [on\|off]` | store the current speed as power-on behaviour |
@@ -223,6 +223,51 @@ Since the line protocol is plain text, scripting it needs no library:
 ```sh
 printf 'enable 1\nmove 90\nread angle\n' | nc -q1 192.168.1.57 3333
 ```
+
+### tools/servoctl
+
+`nc` has no history and no guard rails, so `tools/servoctl` is a friendlier
+client for interactive use. Python 3 only, no dependencies:
+
+```sh
+tools/servoctl 192.168.1.57          # port defaults to 3333
+tools/servoctl mks-servo42c 3333     # or spell it out, like nc
+```
+
+```
+servoctl -> 192.168.1.57:3333
+  speed: default 30 rpm, capped at 100 rpm; '!' prefix bypasses the cap
+  up arrow for history, tab to complete, Ctrl-C sends stop, Ctrl-D quits
+servo> move 90
+-- speed defaulted to 30 rpm
+.. moving 90.00 deg at 30.0 rpm
+OK move
+servo> run cw 400
+-- 400 rpm capped to 100 rpm
+.. running cw at 100.0 rpm (code 10)
+OK run
+```
+
+- **History** on the up arrow, persisted to `$XDG_STATE_HOME/servoctl/history`
+  so it survives across sessions.
+- **Tab completion** of commands, and of the arguments to `read`, `zero` and
+  `set`.
+- **Ctrl-C sends `stop`** rather than quitting. With a motor turning, the reflex
+  key should be a brake — quitting the client would leave it spinning. Use
+  Ctrl-D or `quit` to exit.
+- **Default speed** of 30 rpm filled in whenever `move`/`rev` omit one, matching
+  `SERVO_DEFAULT_RPM` in the firmware so both consoles behave alike.
+- **Speed cap** of 100 rpm applied to `move`, `rev`, `run`, and — via the
+  geometry read from `info` at connect — to the raw speed codes in `speedcode`
+  and `pulses`.
+
+Both limits are adjustable: `--default-rpm`, `--max-rpm`. Every rewrite is
+announced with a `--` line, so nothing changes silently.
+
+> The cap is a convenience, not a safety interlock: it lives in the client, so
+> `nc` or the serial console bypass it entirely, and so does a `!`-prefixed line
+> (`!run cw 400`). If you need a real limit, it belongs in the firmware —
+> `mks_set_max_torque()` and `mks_rpm_to_speed_code()` are where it would go.
 
 > **Security.** The port is unauthenticated and unencrypted: anyone who can
 > reach it can drive the motor. Use it only on a network you trust, and do not
@@ -403,6 +448,7 @@ platformio.ini              build config: env:esp32dev and env:diag
 sdkconfig.defaults          ESP-IDF options (4 MB flash, full printf, console on UART0)
 CMakeLists.txt              IDF project entry point
 scripts/wifi_credentials.py generates wifi_credentials.h from the environment
+tools/servoctl              host-side client: history, completion, speed cap
 include/servo_config.h      wiring, baud, address, motor, wifi and demo settings
 include/mks_servo42c.h      driver API
 src/mks_servo42c.c          protocol implementation

@@ -337,7 +337,7 @@ static void cmd_stop(int argc, char **argv, const cmd_sink_t *s)
 static void cmd_move(int argc, char **argv, const cmd_sink_t *s)
 {
     float degrees = 0.0f;
-    float rpm = DEMO_RPM;
+    float rpm = SERVO_DEFAULT_RPM;
     if (!parse_float(argv[1], &degrees)) {
         cmd_printf(s, "ERR move: bad degrees '%s'\r\n", argv[1]);
         return;
@@ -357,7 +357,7 @@ static void cmd_move(int argc, char **argv, const cmd_sink_t *s)
 static void cmd_rev(int argc, char **argv, const cmd_sink_t *s)
 {
     float revs = 0.0f;
-    float rpm = DEMO_RPM;
+    float rpm = SERVO_DEFAULT_RPM;
     if (!parse_float(argv[1], &revs)) {
         cmd_printf(s, "ERR rev: bad revolutions '%s'\r\n", argv[1]);
         return;
@@ -731,8 +731,8 @@ static void cmd_net(int argc, char **argv, const cmd_sink_t *s)
 static void cmd_demo(int argc, char **argv, const cmd_sink_t *s)
 {
     (void)argc; (void)argv;
-    const uint32_t timeout = move_timeout_ms(DEMO_REVOLUTIONS, DEMO_RPM);
-    const uint8_t code = mks_rpm_to_speed_code(g_servo, DEMO_RPM);
+    const uint32_t timeout = move_timeout_ms(DEMO_REVOLUTIONS, SERVO_DEFAULT_RPM);
+    const uint8_t code = mks_rpm_to_speed_code(g_servo, SERVO_DEFAULT_RPM);
     const uint32_t pulses = mks_degrees_to_pulses(g_servo, DEMO_REVOLUTIONS * 360.0f);
 
     cmd_printf(s, ".. %+.2f rev cw\r\n", DEMO_REVOLUTIONS);
@@ -744,7 +744,7 @@ static void cmd_demo(int argc, char **argv, const cmd_sink_t *s)
     if (abort_requested(s)) { cmd_printf(s, "OK demo aborted\r\n"); return; }
 
     cmd_printf(s, ".. constant speed for 3 s\r\n");
-    esp_err_t err = mks_run_rpm(g_servo, MKS_DIR_CW, DEMO_RPM);
+    esp_err_t err = mks_run_rpm(g_servo, MKS_DIR_CW, SERVO_DEFAULT_RPM);
     if (err != ESP_OK) { report(s, "demo", err); return; }
     if (sleep_or_abort(s, 3000)) {
         mks_stop(g_servo);

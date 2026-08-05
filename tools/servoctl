@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""servoctl - interactive client for the MKS SERVO42C command port.
+
+A friendlier netcat for this particular protocol:
+
+  * command history that survives across runs, on the up arrow
+  * tab completion of commands and their sub-arguments
+  * Ctrl-C sends 'stop' instead of quitting, so the reflex is a brake
+  * a client-side speed cap, and a default speed for commands that omit one
+
+Usage:
+    servoctl <host> [port]          # port defaults to 3333
+
+Replies stream in on their own thread, so a 'stop' typed during a long move
+reaches the servo immediately - the same reason the firmware does not block its
+console task on command completion.
+
+The speed cap is a convenience, not a safety interlock: it lives here, so
+anything that talks to the port directly bypasses it. Prefix a line with '!' to
+bypass it deliberately.
+"""
+
+import argparse
+import os
+import re
+import readline
+import socket
+import sys
+import threading
+
+DEFAULT_PORT = 3333
+DEFAULT_RPM = 30.0
+MAX_RPM = 100.0
+PROMPT = "servo> "
+HISTORY_LIMIT = 2000
+
+# The servo's speed byte is a code, not an RPM figure:
+#     rpm = code * 30000 / pulses_per_rev
+# so capping a raw code needs the geometry, which we learn from the firmware.
+RPM_NUMERATOR = 30000.0
+
+COMMANDS = [
+    "help", "info", "net", "status", "read", "enable", "disable", "stop",
+    "move", "rev", "pulses", "run", "speedcode", "save", "zero", "protect",
+    "set", "cal", "restore", "demo", "raw", "quit", "exit",
+]
+READ_FIELDS = ["encoder", "angle", "error", "pulses", "en", "protect"]
+ZERO_SUBS = ["go", "here", "mode", "speed", "dir"]
+SET_PARAMS = [
+    "current", "mstep", "mode", "dir", "mottype", "protect", "mplyer",
+    "screenoff", "kp", "ki", "kd", "acc", "maxt", "addr", "baud",
+]
+
+
+def history_path():
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    directory = os.path.join(base, "servoctl")
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, "history")
+
+
+class Colours:
+    """ANSI colours, but only when writing to a terminal."""
+
+    def __init__(self, enabled):
+        self.ok = "\033[32m" if enabled else ""
+        self.err = "\033[31m" if enabled else ""
+        self.dim = "\033[2m" if enabled else ""
+        self.warn = "\033[33m" if enabled else ""
+        self.off = "\033[0m" if enabled else ""
+
+    def paint(self, line):
+        if line.startswith("OK"):
+            return self.ok + line + self.off
+        if line.startswith("ERR"):
+            return self.err + line + self.off
+        if line.startswith(".."):
+            return self.dim + line + self.off
+        return line
+
+
+class Policy:
+    """Rewrites outgoing command lines: fills in a default speed, caps speed.
+
+    Only policy lives here. Argument validation stays with the firmware, which
+    already reports usage errors, so a malformed line is passed through
+    untouched rather than second-guessed.
+    """
+
+    def __init__(self, default_rpm, max_rpm):
+        self.default_rpm = default_rpm
+        self.max_rpm = max_rpm
+        self.pulses_per_rev = None
+        self.geometry_known = threading.Event()
+        self._warned_no_geometry = False
+
+    def note_reply(self, line):
+        """Picks the geometry out of replies, so speed codes can be capped.
+
+        Both 'info' and a successful 'set mstep' report it, which also keeps the
+        value correct if the microstep setting changes mid-session.
+        """
+        match = re.search(r"(\d+)\s+pulses/rev", line)
+        if match:
+            self.pulses_per_rev = int(match.group(1))
+            self.geometry_known.set()
+
+    def wait_for_geometry(self, timeout):
+        """Blocks until the geometry is known, or the timeout expires.
+
+        Worth waiting for: replies arrive on another thread, so without this the
+        first speed-code command of a session can be sent before the geometry
+        needed to cap it has arrived, and would go through uncapped.
+        """
+        return self.geometry_known.wait(timeout)
+
+    def max_speed_code(self):
+        if not self.pulses_per_rev:
+            return None
+        return max(1, int(self.max_rpm * self.pulses_per_rev / RPM_NUMERATOR))
+
+    def code_to_rpm(self, code):
+        if not self.pulses_per_rev:
+            return None
+        return code * RPM_NUMERATOR / self.pulses_per_rev
+
+    @staticmethod
+    def _fmt(value):
+        return f"{value:g}"
+
+    def _cap_rpm(self, text, notes):
+        try:
+            value = float(text)
+        except ValueError:
+            return text                      # let the firmware reject it
+        if abs(value) > self.max_rpm:
+            capped = self.max_rpm if value > 0 else -self.max_rpm
+            notes.append(f"{self._fmt(value)} rpm capped to "
+                         f"{self._fmt(capped)} rpm")
+            return self._fmt(capped)
+        return text
+
+    def _cap_code(self, text, notes):
+        try:
+            code = int(text, 0)
+        except ValueError:
+            return text
+        limit = self.max_speed_code()
+        if limit is None:
+            if not self._warned_no_geometry:
+                notes.append("speed code not capped: geometry unknown, "
+                             "run 'info' first")
+                self._warned_no_geometry = True
+            return text
+        if code > limit:
+            rpm = self.code_to_rpm(code)
+            notes.append(f"speed code {code} ({self._fmt(rpm)} rpm) capped to "
+                         f"{limit} ({self._fmt(self.code_to_rpm(limit))} rpm)")
+            return str(limit)
+        return text
+
+    def apply(self, line):
+        """Returns (line_to_send, notes)."""
+        notes = []
+        parts = line.split()
+        if not parts:
+            return line, notes
+
+        command = parts[0].lower()
+        args = parts[1:]
+
+        # move <deg> [rpm] / rev <revs> [rpm]: supply the default, or cap.
+        if command in ("move", "rev") and len(args) >= 1:
+            if len(args) == 1:
+                args.append(self._fmt(self.default_rpm))
+                notes.append(f"speed defaulted to "
+                             f"{self._fmt(self.default_rpm)} rpm")
+            else:
+                args[1] = self._cap_rpm(args[1], notes)
+
+        # run <cw|ccw> <rpm>
+        elif command == "run" and len(args) >= 2:
+            args[1] = self._cap_rpm(args[1], notes)
+
+        # speedcode <cw|ccw> <code>
+        elif command == "speedcode" and len(args) >= 2:
+            args[1] = self._cap_code(args[1], notes)
+
+        # pulses <cw|ccw> <code> <n>
+        elif command == "pulses" and len(args) >= 2:
+            args[1] = self._cap_code(args[1], notes)
+
+        return " ".join([parts[0]] + args), notes
+
+
+class Printer:
+    """Prints asynchronous output without eating the line being typed."""
+
+    def __init__(self, colours):
+        self.colours = colours
+        self.lock = threading.Lock()
+
+    def line(self, text):
+        with self.lock:
+            pending = readline.get_line_buffer()
+            # Erase the prompt and partial input, print, then put them back.
+            sys.stdout.write("\r\033[K" + self.colours.paint(text) + "\n")
+            sys.stdout.write(PROMPT + pending)
+            sys.stdout.flush()
+
+    def note(self, text):
+        self.line(self.colours.warn + "-- " + text + self.colours.off)
+
+
+def make_completer():
+    def completer(text, state):
+        buffer = readline.get_line_buffer()[:readline.get_endidx()]
+        words = buffer.split()
+        # Completing the first word, or still on it.
+        if len(words) <= 1 and not buffer.endswith(" "):
+            pool = COMMANDS
+        else:
+            head = words[0].lower()
+            pool = {"read": READ_FIELDS,
+                    "zero": ZERO_SUBS,
+                    "set": SET_PARAMS}.get(head, [])
+            if len(words) > 2 or (len(words) == 2 and buffer.endswith(" ")):
+                pool = []                    # only the first argument
+        matches = [c for c in pool if c.startswith(text)]
+        return matches[state] if state < len(matches) else None
+    return completer
+
+
+def reader_thread(sock, policy, printer, on_close):
+    buffered = b""
+    while True:
+        try:
+            chunk = sock.recv(4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        buffered += chunk
+        while b"\n" in buffered:
+            raw, buffered = buffered.split(b"\n", 1)
+            line = raw.decode("utf-8", "replace").rstrip("\r")
+            policy.note_reply(line)
+            if line:
+                printer.line(line)
+    on_close()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Interactive client for the MKS SERVO42C command port.")
+    parser.add_argument("host", help="address or hostname of the ESP32")
+    parser.add_argument("port", nargs="?", type=int, default=DEFAULT_PORT,
+                        help=f"TCP port (default {DEFAULT_PORT})")
+    parser.add_argument("--max-rpm", type=float, default=MAX_RPM,
+                        help=f"client-side speed cap (default {MAX_RPM:g})")
+    parser.add_argument("--default-rpm", type=float, default=DEFAULT_RPM,
+                        help="speed used when a move omits one "
+                             f"(default {DEFAULT_RPM:g})")
+    parser.add_argument("--no-colour", action="store_true",
+                        help="never colourise replies")
+    args = parser.parse_args()
+
+    if args.default_rpm > args.max_rpm:
+        parser.error(f"--default-rpm ({args.default_rpm:g}) exceeds "
+                     f"--max-rpm ({args.max_rpm:g})")
+
+    colours = Colours(sys.stdout.isatty() and not args.no_colour)
+    printer = Printer(colours)
+    policy = Policy(args.default_rpm, args.max_rpm)
+
+    try:
+        sock = socket.create_connection((args.host, args.port), timeout=5)
+    except OSError as exc:
+        sys.exit(f"servoctl: cannot connect to {args.host}:{args.port}: {exc}")
+    sock.settimeout(None)
+
+    history = history_path()
+    try:
+        readline.read_history_file(history)
+    except FileNotFoundError:
+        pass
+    readline.set_history_length(HISTORY_LIMIT)
+    readline.set_completer(make_completer())
+    readline.set_completer_delims(" \t")
+    readline.parse_and_bind("tab: complete")
+
+    def save_history():
+        try:
+            readline.write_history_file(history)
+        except OSError:
+            pass
+
+    def on_close():
+        printer.line(colours.err + "*** connection closed by the servo"
+                     + colours.off)
+        save_history()
+        # The main thread is parked in input(); nothing can unblock it, so leave
+        # directly rather than hanging until the user presses a key.
+        os._exit(1)
+
+    threading.Thread(target=reader_thread,
+                     args=(sock, policy, printer, on_close),
+                     daemon=True).start()
+
+    def send(line):
+        try:
+            sock.sendall((line + "\n").encode("utf-8"))
+            return True
+        except OSError as exc:
+            printer.line(f"*** send failed: {exc}")
+            return False
+
+    print(f"servoctl -> {args.host}:{args.port}")
+    print(f"  speed: default {args.default_rpm:g} rpm, "
+          f"capped at {args.max_rpm:g} rpm; '!' prefix bypasses the cap")
+    print("  up arrow for history, tab to complete, "
+          "Ctrl-C sends stop, Ctrl-D quits")
+
+    # Learn the geometry before accepting input, so that the first speed-code
+    # command cannot be sent while the value needed to cap it is still in flight.
+    send("info")
+    if not policy.wait_for_geometry(3.0):
+        print("  warning: no geometry in the reply to 'info'; "
+              "speed codes will not be capped")
+
+    while True:
+        try:
+            line = input(PROMPT)
+        except EOFError:
+            print()
+            break
+        except KeyboardInterrupt:
+            # A motor is turning: make the panic key a brake, not an exit.
+            print()
+            send("stop")
+            continue
+
+        line = line.strip()
+        if not line:
+            continue
+        if line.lower() in ("quit", "exit"):
+            # readline already recorded it; drop it so the next session's
+            # history holds only servo commands.
+            try:
+                readline.remove_history_item(
+                    readline.get_current_history_length() - 1)
+            except (ValueError, IndexError):
+                pass
+            break
+
+        if line.startswith("!"):
+            send(line[1:].lstrip())
+            continue
+
+        rewritten, notes = policy.apply(line)
+        for note in notes:
+            printer.note(note)
+        if not send(rewritten):
+            break
+
+    save_history()
+    sock.close()
+
+
+if __name__ == "__main__":
+    main()
