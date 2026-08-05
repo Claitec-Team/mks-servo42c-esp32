@@ -70,8 +70,11 @@
  * way to turn to reach an absolute angle. Get it wrong and goto moves away from
  * its target instead of towards it - it says so and tells you to flip this,
  * and because each goto is one bounded move it cannot run away.
+ *
+ * Measured on this hardware: 'move +10' (clockwise) moved the reported angle
+ * from -119.987 to -129.974, so clockwise decreases it. Hence 0.
  */
-#define SERVO_ANGLE_INCREASES_CW  1
+#define SERVO_ANGLE_INCREASES_CW  0
 
 /* ------------------------------------------------------------------ */
 /* WiFi remote control                                                 */

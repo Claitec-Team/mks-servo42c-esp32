@@ -116,6 +116,44 @@ static bool sleep_or_abort(const cmd_sink_t *s, uint32_t ms)
     return abort_requested(s);
 }
 
+/*
+ * Where the shaft was before a move started, so that a move can be confirmed by
+ * position when the servo's completion frame goes missing.
+ *
+ * Measured on real hardware: the servo frequently never sends the second reply
+ * to an FD command, yet the shaft always reaches the commanded position. The
+ * acknowledgement is therefore not trustworthy on its own, while the encoder is.
+ */
+typedef struct {
+    bool  valid;         /* false if the pre-move angle could not be read */
+    float before_deg;
+    float expected_deg;  /* commanded distance; only its magnitude is used */
+} move_check_t;
+
+/* True if the shaft has turned as far as it was told to.
+ *
+ * Compares magnitudes only, so this does not depend on
+ * SERVO_ANGLE_INCREASES_CW being right - goto already checks direction, and
+ * move/rev/pulses are told which way to turn explicitly.
+ */
+static bool move_looks_complete(const move_check_t *check)
+{
+    if (check == NULL || !check->valid) {
+        return false;
+    }
+    float now = 0.0f;
+    if (mks_read_angle_deg(g_servo, &now) != ESP_OK) {
+        return false;
+    }
+    const float moved = fabsf(now - check->before_deg);
+    const float want = fabsf(check->expected_deg);
+    float tolerance = want * 0.05f;
+    if (tolerance < 1.0f) {
+        tolerance = 1.0f;          /* encoder noise and closed-loop error */
+    }
+    return fabsf(moved - want) <= tolerance;
+}
+
 /* Runs an already-started FD move to completion.
  *
  * The servo answers an FD command twice: status 1 when the move starts and
@@ -128,7 +166,8 @@ static bool sleep_or_abort(const cmd_sink_t *s, uint32_t ms)
  * like goto can check the result and emit its own. Failures always report.
  */
 static bool await_move(const cmd_sink_t *s, const char *what,
-                       uint32_t timeout_ms, bool announce_ok)
+                       uint32_t timeout_ms, bool announce_ok,
+                       const move_check_t *check)
 {
     uint32_t polls = (timeout_ms + ABORT_POLL_MS - 1) / ABORT_POLL_MS;
     if (polls == 0) {
@@ -162,11 +201,21 @@ static bool await_move(const cmd_sink_t *s, const char *what,
         }
     }
 
-    cmd_printf(s, "ERR %s: no completion reply within %" PRIu32 " ms\r\n",
-               what, timeout_ms);
-    cmd_printf(s, ".. the servo accepted the move but never reported finishing;"
-                  " check 'read en' and 'read protect'\r\n");
+    /* No completion frame. Ask the encoder instead of assuming the worst: on
+     * this servo the frame often goes missing even though the move finished. */
     mks_discard_pending(g_servo, 100);
+
+    if (move_looks_complete(check)) {
+        if (announce_ok) {
+            cmd_printf(s, "OK %s (position reached; the servo sent no "
+                          "completion frame)\r\n", what);
+        }
+        return true;
+    }
+
+    cmd_printf(s, "ERR %s: no completion reply within %" PRIu32 " ms, and the "
+                  "shaft is not where it was told to go\r\n", what, timeout_ms);
+    cmd_printf(s, ".. check 'read en' and 'read protect'\r\n");
     return false;
 }
 
@@ -188,6 +237,13 @@ static bool start_and_await(const cmd_sink_t *s, const char *what,
         cmd_printf(s, "OK %s pre-empted before start\r\n", what);
         return false;
     }
+    /* Note where the shaft is first, so a missing completion frame can be
+     * settled by asking the encoder rather than by guessing. One extra
+     * read costs a few milliseconds. */
+    move_check_t check = { .valid = false, .before_deg = 0.0f, .expected_deg = 0.0f };
+    check.expected_deg = (float)pulses * 360.0f / (float)mks_pulses_per_rev(g_servo);
+    check.valid = (mks_read_angle_deg(g_servo, &check.before_deg) == ESP_OK);
+
     mks_run_status_t status = MKS_RUN_FAIL;
     esp_err_t err = mks_start_move_pulses(g_servo, dir, code, pulses, &status);
     if (err != ESP_OK) {
@@ -202,10 +258,17 @@ static bool start_and_await(const cmd_sink_t *s, const char *what,
         }
         return true;
     }
-    return await_move(s, what, timeout_ms, announce_ok);
+    return await_move(s, what, timeout_ms, announce_ok, &check);
 }
 
-/* Completion timeout for a move, from its length and speed plus margin. */
+/* Completion timeout for a move: how long it should take, plus 15% for the
+ * acceleration ramp, plus a fixed slack.
+ *
+ * The slack is deliberately small. Since the servo often never sends the
+ * completion frame, this timeout is reached on a large fraction of moves, and
+ * every millisecond of it is dead time before await_move() falls back to
+ * checking the encoder. It only has to be long enough for a frame the servo does
+ * send to arrive, which is immediate. */
 static uint32_t move_timeout_ms(float revolutions, float rpm)
 {
     if (rpm < 0.1f) {
@@ -214,7 +277,8 @@ static uint32_t move_timeout_ms(float revolutions, float rpm)
     if (revolutions < 0) {
         revolutions = -revolutions;
     }
-    return (uint32_t)(revolutions / rpm * 60.0f * 1000.0f) + 3000u;
+    const float travel_ms = revolutions / rpm * 60.0f * 1000.0f;
+    return (uint32_t)(travel_ms * 1.15f) + 800u;
 }
 
 /* ------------------------------------------------------------------ */
@@ -397,15 +461,31 @@ static mks_dir_t dir_for_angle_delta(float delta)
 #endif
 }
 
+/* Signed shortest way round from `from` to `to`, in (-180, +180].
+ * Exactly half a turn resolves to +180, so the choice is at least repeatable. */
+static float shortest_delta(float from, float to)
+{
+    float d = fmodf(to - from, 360.0f);
+    if (d > 180.0f) {
+        d -= 360.0f;
+    }
+    if (d <= -180.0f) {
+        d += 360.0f;
+    }
+    return d;
+}
+
 /*
- * goto <angle> [rpm] - absolute positioning.
+ * goto <angle> [rpm] - absolute positioning by the shortest route.
  *
  * The servo only moves relative distances, so this reads where the shaft is,
- * works out the difference, and issues one bounded relative move. The angle is
- * the servo's own accumulating measurement: it counts across full turns rather
- * than wrapping at 360, so 'goto 0' after ten forward turns unwinds all ten
- * rather than taking the short way round. The move distance is printed before
- * anything turns, so an unintended long unwind can be seen and stopped.
+ * works out the difference, and issues one bounded relative move.
+ *
+ * The target is a shaft position modulo 360, and the difference is taken the
+ * short way round, so no goto ever turns more than half a revolution. The
+ * servo's own angle keeps accumulating across turns, so after a few turns the
+ * reading will not match the target numerically even though the shaft is in the
+ * right place - every error here is therefore a modular one.
  *
  * Afterwards the angle is read back and reported. If the move ended further
  * from the target than it started, the angle counts the opposite way from what
@@ -434,18 +514,18 @@ static void cmd_goto(int argc, char **argv, const cmd_sink_t *s)
         return;
     }
 
-    const float delta = target - current;
+    const float delta = shortest_delta(current, target);
     const uint32_t pulses = mks_degrees_to_pulses(g_servo, delta);
 
     if (pulses == 0) {
-        cmd_printf(s, ".. at %.2f deg, within one pulse of %.2f deg\r\n",
-                   current, target);
+        cmd_printf(s, ".. at %.2f deg, already within one pulse of %.2f deg "
+                      "(mod 360)\r\n", current, target);
         cmd_printf(s, "OK goto\r\n");
         return;
     }
 
-    cmd_printf(s, ".. at %.2f deg, target %.2f deg: moving %+.2f deg "
-                  "at %.1f rpm\r\n", current, target, delta, rpm);
+    cmd_printf(s, ".. at %.2f deg, target %.2f deg (mod 360): shortest path "
+                  "%+.2f deg at %.1f rpm\r\n", current, target, delta, rpm);
 
     if (!start_and_await(s, "goto", dir_for_angle_delta(delta),
                          mks_rpm_to_speed_code(g_servo, rpm), pulses,
@@ -462,7 +542,7 @@ static void cmd_goto(int argc, char **argv, const cmd_sink_t *s)
         return;
     }
 
-    const float residual = target - arrived;
+    const float residual = shortest_delta(arrived, target);
     cmd_printf(s, ".. arrived at %.2f deg, %+.3f deg from target\r\n",
                arrived, residual);
 
@@ -937,7 +1017,7 @@ static const cmd_entry_t kCommands[] = {
     { "stop",      1, cmd_stop,      "stop                       stop motion" },
     { "move",      2, cmd_move,      "move <deg> [rpm]           relative move, blocks" },
     { "rev",       2, cmd_rev,       "rev <revs> [rpm]           relative move, blocks" },
-    { "goto",      2, cmd_goto,      "goto <angle> [rpm]         absolute move, blocks" },
+    { "goto",      2, cmd_goto,      "goto <angle> [rpm]         absolute, shortest way round" },
     { "pulses",    4, cmd_pulses,    "pulses <cw|ccw> <code> <n> raw pulse move" },
     { "run",       3, cmd_run,       "run <cw|ccw> <rpm>         constant speed" },
     { "speedcode", 3, cmd_speedcode, "speedcode <cw|ccw> <0-127> constant speed, raw" },
@@ -967,8 +1047,8 @@ static void cmd_help(int argc, char **argv, const cmd_sink_t *s)
     cmd_printf(s, "  kp|ki|kd|acc|maxt <n>   addr <0xE0-0xE9>   baud <rate>\r\n");
     cmd_printf(s, "examples:\r\n");
     cmd_printf(s, "  enable 1 / move 90 / move -90 60 / run ccw 120 / stop\r\n");
-    cmd_printf(s, "  goto is absolute and counts across full turns, so it does\r\n");
-    cmd_printf(s, "  not wrap at 360; move/rev are relative\r\n");
+    cmd_printf(s, "  goto is absolute mod 360 and takes the shortest way round,\r\n");
+    cmd_printf(s, "  never more than 180 deg; move/rev are relative\r\n");
     cmd_printf(s, "OK help\r\n");
 }
 

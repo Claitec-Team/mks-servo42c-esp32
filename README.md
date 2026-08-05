@@ -15,9 +15,12 @@ USB — so the servo sits on **UART2**:
 
 | ESP32           | MKS SERVO42C |
 | --------------- | ------------ |
-| GPIO17 (TX2)    | RX           |
-| GPIO16 (RX2)    | TX           |
-| GND             | GND          |
+| GPIO32 (TX)     | `Rx`         |
+| GPIO33 (RX)     | `Tx`         |
+| GND             | `G`          |
+
+Any GPIO works — the ESP32 routes UART signals through its GPIO matrix — so
+moving the link is just the two defines in `servo_config.h`.
 
 A **common ground is required**. The servo's motor supply (12–24 V) is separate;
 the ESP32 is powered over USB. Do not feed 5 V into the servo's logic pins — both
@@ -32,7 +35,7 @@ The firmware talks to a servo configured as:
 | Menu option | Value    | Why |
 | ----------- | -------- | --- |
 | `Mode`      | `CR_UART` | Required for the `F3`/`F6`/`F7`/`FD` motion commands |
-| `UartBaud`  | `19200`   | Must match `SERVO_BAUD_RATE` |
+| `UartBaud`  | `38400`   | Must match `SERVO_BAUD_RATE` |
 | `UartAddr`  | `0xE0`    | Must match `SERVO_ADDRESS` |
 | `MStep`     | `128`     | Set by the firmware at boot; see [Microstepping](#microstepping-and-speed) |
 | `MotType`   | `1.8`     | Must match `SERVO_STEP_ANGLE_IS_1_8` |
@@ -52,7 +55,7 @@ pio device monitor       # log console, 115200 baud
 ```
 
 The monitor's 115200 baud is the ESP-IDF console on UART0 and is unrelated to the
-19200 baud servo link on UART2.
+38400 baud servo link on UART2.
 
 ## Control console
 
@@ -61,7 +64,7 @@ USB serial port. Open it with `pio device monitor` and type `help`.
 
 ```
 servo> info
-link      UART2 TX=GPIO19 RX=GPIO18 38400 baud addr 0xE0
+link      UART2 TX=GPIO32 RX=GPIO33 38400 baud addr 0xE0
 motor     1.8 deg/step, MStep 128
 geometry  25600 pulses/rev
 speed     code 1 = 1.172 rpm, code 127 = 148.8 rpm
@@ -88,7 +91,7 @@ parse them.
 | `read <encoder\|angle\|error\|pulses\|en\|protect>` | one field |
 | `enable [0\|1]` / `disable` / `stop` | motor power and stopping |
 | `move <deg> [rpm]` / `rev <revs> [rpm]` | relative positioning, blocks until done; speed defaults to `SERVO_DEFAULT_RPM` |
-| `goto <angle> [rpm]` | absolute positioning — see below |
+| `goto <angle> [rpm]` | absolute positioning, shortest way round — see below |
 | `pulses <cw\|ccw> <code> <n>` | raw pulse move |
 | `run <cw\|ccw> <rpm>` / `speedcode <cw\|ccw> <0-127>` | constant speed |
 | `save [on\|off]` | store the current speed as power-on behaviour |
@@ -169,27 +172,28 @@ works out the difference, and issues one bounded relative move:
 
 ```
 servo> read angle
-OK angle 142.603
+OK angle 657.746
 servo> goto 90
-.. at 142.60 deg, target 90.00 deg: moving -52.60 deg at 30.0 rpm
-.. arrived at 90.01 deg, -0.012 deg from target
+.. at 657.72 deg, target 90.00 deg (mod 360): shortest path +152.28 deg at 30.0 rpm
+.. arrived at 810.00 deg, -0.000 deg from target
 OK goto
 ```
 
 Two things worth knowing:
 
-**It counts across full turns and does not wrap at 360.** The angle is the
-servo's own accumulating measurement, so after ten forward turns `goto 0` unwinds
-all ten rather than taking the short way round. That is what "absolute" means
-here, and it is the right behaviour for a stage or an axis, but it can be a
-surprise on something that spins freely — which is why the move distance is
-printed before anything turns, so a long unwind can be seen and stopped.
+**The target is a position modulo 360, reached the shortest way round.** No `goto`
+ever turns more than half a revolution, so it cannot unwind several turns
+unexpectedly. The servo's own angle keeps accumulating across turns, though, so
+after a few turns the reading will not equal the target numerically even though
+the shaft is in the right place — `goto 0` from `720.0` is already there and does
+not move. Every error reported is therefore a modular one.
 
 **The direction depends on your wiring.** Whether a clockwise move makes the
 reported angle rise or fall depends on the servo's `Dir` setting and the motor's
 coil order, so it cannot be known in advance. `SERVO_ANGLE_INCREASES_CW` in
-`servo_config.h` says which it is, defaulting to 1. If it is wrong, `goto` moves
-away from the target and says so:
+`servo_config.h` says which it is. On the hardware this was developed against a
+clockwise move *decreases* the angle, so it is set to 0 — check yours, because if
+it is wrong `goto` moves away from the target and says so:
 
 ```
 ERR goto: ended further from the target than it started
@@ -197,8 +201,11 @@ ERR goto: ended further from the target than it started
 ```
 
 Because each `goto` is a single bounded move, a wrong setting cannot run away —
-it overshoots once, reports it, and stops. Accuracy is limited by rounding the
-distance to whole pulses, so about 0.014° at `MStep = 128`.
+it overshoots once, reports it, and stops.
+
+Measured on real hardware at `MStep = 128`: 13 consecutive `goto` commands in both
+directions all landed within **0.5°** of target, most within 0.2°. The floor is
+the servo's own closed-loop error rather than pulse rounding, which is 0.014°.
 
 ### Homing
 
@@ -216,6 +223,40 @@ servo> zero go
 Once `0_Mode` is not `Disable` the servo also homes by itself at every power-on —
 `zero mode off` turns that back off. `zero go` returns as soon as the servo
 accepts it and homes on its own, so poll `read angle` to see it arrive.
+
+### Completion reporting
+
+An `FD` move is supposed to be acknowledged twice: status 1 when it starts and
+status 2 when it finishes. On the hardware this was developed against **the second
+frame frequently never arrives**, at rates from a few percent to most moves
+depending on timing — while the shaft reaches the commanded position every time.
+The acknowledgement is simply not trustworthy on its own.
+
+So a move that gets no completion frame is settled by the encoder rather than
+assumed failed. `move`/`rev`/`pulses`/`goto` read the shaft angle before starting,
+and if the frame never comes they check whether it turned as far as it was told:
+
+```
+servo> move 20
+.. moving 20.00 deg at 30.0 rpm
+OK move (position reached; the servo sent no completion frame)
+```
+
+If the shaft did *not* arrive, that is still a failure and still reported:
+
+```
+ERR move: no completion reply within 928 ms, and the shaft is not where it was told to go
+.. check 'read en' and 'read protect'
+```
+
+The comparison is by magnitude, so it does not depend on
+`SERVO_ANGLE_INCREASES_CW`. The timeout margin is deliberately small (15% of the
+expected travel plus 800 ms) because it is reached so often, and every millisecond
+of it is dead time before the encoder is consulted.
+
+Following error (`read error`) is *not* usable as a witness here, in case it looks
+tempting: the closed loop keeps it under about half a degree even mid-move, so it
+cannot tell "finished" from "still going".
 
 If the servo does not answer at boot, the firmware prints a wiring/config
 checklist and still starts the console, so you can probe by hand with `raw`.
@@ -422,9 +463,9 @@ after a disconnect reused the descriptor.
 
 mks_t servo;
 const mks_config_t cfg = {
-    .uart_num = 2, .tx_gpio = 17, .rx_gpio = 16,
-    .baud_rate = 19200, .address = 0xE0,
-    .microsteps = 16, .step_angle_1_8 = true,
+    .uart_num = 2, .tx_gpio = 32, .rx_gpio = 33,
+    .baud_rate = 38400, .address = 0xE0,
+    .microsteps = 128, .step_angle_1_8 = true,
     .reply_timeout_ms = 300,
 };
 ESP_ERROR_CHECK(mks_init(&servo, &cfg));
