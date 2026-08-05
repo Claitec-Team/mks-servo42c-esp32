@@ -52,6 +52,7 @@ static void console_task(void *arg)
 
     echo("\r\n");
     echo("MKS SERVO42C control console. Type 'help'.\r\n");
+    servo_cmd_banner(&g_sink);
     echo("'stop' works while a move is running.\r\n");
     echo(PROMPT);
 

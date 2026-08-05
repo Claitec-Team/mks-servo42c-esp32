@@ -38,6 +38,11 @@ void cmd_printf(const cmd_sink_t *sink, const char *fmt, ...)
 /* Binds the command layer to an initialised servo handle. Call once. */
 void servo_cmd_init(mks_t *servo);
 
+/* Writes a one-line summary of the geometry in force - microsteps, pulses per
+ * revolution, usable speed range - for transports to greet a new client with,
+ * so the numbers their distances and speeds are scaled by are never a guess. */
+void servo_cmd_banner(const cmd_sink_t *sink);
+
 /* Tokenises `line` on whitespace and dispatches it. `line` is modified in
  * place, so pass a mutable buffer. Blank lines and '#' comments are ignored. */
 void servo_cmd_execute_line(char *line, const cmd_sink_t *sink);

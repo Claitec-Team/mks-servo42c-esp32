@@ -33,8 +33,26 @@
 /* Motor characteristics (must match the servo's own settings)         */
 /* ------------------------------------------------------------------ */
 
-/* Menu -> MStep. Used to convert degrees <-> pulses and speed <-> RPM. */
-#define SERVO_MICROSTEPS  16
+/*
+ * Menu -> MStep. Used to convert degrees <-> pulses and speed <-> RPM.
+ *
+ * Higher means slower and finer, because speed is a 7-bit code, not an RPM
+ * figure: Vrpm = code * 30000 / (MStep * 200). At MStep 16 the slowest possible
+ * speed is code 1 = 9.375 rpm; at 128 it is 1.17 rpm, with a 148.8 rpm ceiling.
+ * The screen's MStep menu only offers powers of two, 1 to 256.
+ */
+#define SERVO_MICROSTEPS  128
+
+/*
+ * Push SERVO_MICROSTEPS into the servo during startup, so it always comes up in
+ * a known state even if the screen buttons were used or the board was swapped.
+ *
+ * The servo has no command to read MStep back, so this cannot be a
+ * write-only-if-it-differs: it is one flash write per boot on the servo. Set to
+ * 0 to leave whatever the servo already has, in which case SERVO_MICROSTEPS must
+ * be edited to match or every distance and speed will be scaled wrongly.
+ */
+#define SERVO_APPLY_MICROSTEPS_ON_BOOT  1
 
 /* 1 for a 1.8 deg/step motor (200 full steps/rev, the usual NEMA17),
  * 0 for a 0.9 deg/step motor (400 full steps/rev). */

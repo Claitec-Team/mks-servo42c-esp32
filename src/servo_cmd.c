@@ -977,6 +977,20 @@ void servo_cmd_init(mks_t *servo)
     g_servo = servo;
 }
 
+void servo_cmd_banner(const cmd_sink_t *sink)
+{
+    if (g_servo == NULL) {
+        cmd_printf(sink, "servo not initialised\r\n");
+        return;
+    }
+    cmd_printf(sink, "MStep %u: %" PRIu32 " pulses/rev, %.3f deg/pulse, "
+                     "%.2f-%.1f rpm\r\n",
+               g_servo->cfg.microsteps, mks_pulses_per_rev(g_servo),
+               360.0f / (float)mks_pulses_per_rev(g_servo),
+               mks_speed_code_to_rpm(g_servo, 1),
+               mks_speed_code_to_rpm(g_servo, 127));
+}
+
 /* True if the first word of `line` is exactly `word`, ignoring case. */
 static bool leading_word_is(const char *line, const char *word)
 {

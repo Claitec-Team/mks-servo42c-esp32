@@ -85,9 +85,34 @@ static esp_err_t probe_servo(void)
     return ESP_ERR_TIMEOUT;
 }
 
+#if SERVO_APPLY_MICROSTEPS_ON_BOOT
+/* Puts the servo on SERVO_MICROSTEPS and says so, loudly enough that the number
+ * in use is never a guess. The servo's own MStep menu also updates, so the
+ * board's screen agrees with the firmware. */
+static void apply_microsteps(void)
+{
+    esp_err_t err = mks_set_microsteps(&servo, SERVO_MICROSTEPS);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "could not set MStep to %d: %s",
+                 SERVO_MICROSTEPS, esp_err_to_name(err));
+        ESP_LOGE(TAG, "  every distance and speed will be scaled wrongly unless");
+        ESP_LOGE(TAG, "  the servo is already on MStep %d", SERVO_MICROSTEPS);
+        return;
+    }
+    ESP_LOGI(TAG, "MStep set to %d: %" PRIu32 " pulses/rev, %.2f deg/pulse",
+             SERVO_MICROSTEPS, mks_pulses_per_rev(&servo),
+             360.0f / (float)mks_pulses_per_rev(&servo));
+    ESP_LOGI(TAG, "  speed range %.2f rpm (code 1) to %.1f rpm (code 127)",
+             mks_speed_code_to_rpm(&servo, 1),
+             mks_speed_code_to_rpm(&servo, 127));
+    ESP_LOGI(TAG, "  the servo's MStep menu now shows %d too", SERVO_MICROSTEPS);
+}
+#endif
+
 #if SERVO_APPLY_SETTINGS_ON_BOOT
-/* Writes the servo's EEPROM. Off by default, see servo_config.h. The console's
- * 'set' commands do the same thing on demand. */
+/* Writes the rest of the servo's EEPROM settings. Off by default, see
+ * servo_config.h. The console's 'set' commands do the same thing on demand.
+ * Microsteps are handled by apply_microsteps() above. */
 static void apply_settings(void)
 {
     ESP_LOGI(TAG, "writing servo settings to EEPROM");
@@ -96,7 +121,6 @@ static void apply_settings(void)
         &servo, SERVO_STEP_ANGLE_IS_1_8 ? MKS_MOTOR_1_8_DEG : MKS_MOTOR_0_9_DEG));
     ESP_ERROR_CHECK_WITHOUT_ABORT(mks_set_mode(&servo, MKS_MODE_CR_UART));
     ESP_ERROR_CHECK_WITHOUT_ABORT(mks_set_current_ma(&servo, SERVO_BOOT_CURRENT_MA));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(mks_set_microsteps(&servo, SERVO_MICROSTEPS));
     ESP_ERROR_CHECK_WITHOUT_ABORT(mks_set_stall_protection(&servo, true));
     ESP_ERROR_CHECK_WITHOUT_ABORT(mks_set_interpolation(&servo, true));
 }
@@ -136,11 +160,15 @@ void app_main(void)
                  SERVO_BAUD_RATE, SERVO_ADDRESS);
         ESP_LOGE(TAG, "  - servo is powered from its 12-24 V supply");
         ESP_LOGE(TAG, "starting the console anyway so you can probe by hand");
-    }
-
-#if SERVO_APPLY_SETTINGS_ON_BOOT
-    apply_settings();
+    } else {
+        /* Only worth attempting once the link is known to work. */
+#if SERVO_APPLY_MICROSTEPS_ON_BOOT
+        apply_microsteps();
 #endif
+#if SERVO_APPLY_SETTINGS_ON_BOOT
+        apply_settings();
+#endif
+    }
 
     /* The servo task takes ownership of `servo` from here on; nothing else may
      * touch it. Transports submit command lines through servo_ctl_submit(). */

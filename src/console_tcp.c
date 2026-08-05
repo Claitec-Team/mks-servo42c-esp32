@@ -110,6 +110,7 @@ static void client_task(void *arg)
 
     ESP_LOGI(TAG, "client %d connected", slot);
     tcp_write(sink.ctx, "MKS SERVO42C. One command per line, 'help' for a list.\r\n");
+    servo_cmd_banner(&sink);
 
     char line[TCP_LINE_MAX];
     size_t len = 0;

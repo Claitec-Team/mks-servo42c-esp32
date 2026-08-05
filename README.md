@@ -34,13 +34,14 @@ The firmware talks to a servo configured as:
 | `Mode`      | `CR_UART` | Required for the `F3`/`F6`/`F7`/`FD` motion commands |
 | `UartBaud`  | `19200`   | Must match `SERVO_BAUD_RATE` |
 | `UartAddr`  | `0xE0`    | Must match `SERVO_ADDRESS` |
-| `MStep`     | `16`      | Must match `SERVO_MICROSTEPS` for correct angle/RPM math |
+| `MStep`     | `128`     | Set by the firmware at boot; see [Microstepping](#microstepping-and-speed) |
 | `MotType`   | `1.8`     | Must match `SERVO_STEP_ANGLE_IS_1_8` |
 
 Run `Cal` (calibration) once with the motor unloaded before using closed-loop modes.
 
-`MStep` and `MotType` only affect this side's unit conversion — get them wrong and
-the motor still turns, just not by the distance you asked for.
+`MotType` only affects this side's unit conversion — get it wrong and the motor
+still turns, just not by the distance you asked for. `MStep` matters the same
+way, but the firmware sets it at every boot so it cannot drift out of step.
 
 ## Build, flash, monitor
 
@@ -61,9 +62,9 @@ USB serial port. Open it with `pio device monitor` and type `help`.
 ```
 servo> info
 link      UART2 TX=GPIO19 RX=GPIO18 38400 baud addr 0xE0
-motor     1.8 deg/step, MStep 16
-geometry  3200 pulses/rev
-speed     code 1 = 9.375 rpm, code 127 = 1190.6 rpm
+motor     1.8 deg/step, MStep 128
+geometry  25600 pulses/rev
+speed     code 1 = 1.172 rpm, code 127 = 148.8 rpm
 OK info
 
 servo> enable 1
@@ -106,6 +107,61 @@ The `set` commands write the servo's EEPROM — use them for commissioning, not 
 a loop. `set addr` and `set baud` also re-point this side of the link so the
 session keeps working; edit `servo_config.h` to make the change survive a reboot.
 
+### Microstepping and speed
+
+Speed is a 7-bit **code**, not an RPM figure:
+
+```
+Vrpm = code x 30000 / (MStep x 200)          # 1.8 deg/step motor
+```
+
+RPM is therefore *inversely* proportional to `MStep`: **raising it makes the motor
+slower and finer, lowering it makes it faster and coarser.** Since the code is an
+integer, `MStep` also sets the slowest speed achievable at all — code 1.
+
+| MStep | pulses/rev | slowest (code 1) | fastest (code 127) | deg/pulse |
+| ----- | ---------- | ---------------- | ------------------ | --------- |
+| 8     | 1600       | 18.75 rpm        | 2381 rpm           | 0.2250    |
+| 16    | 3200       | 9.375 rpm        | 1191 rpm           | 0.1125    |
+| 32    | 6400       | 4.688 rpm        | 595 rpm            | 0.0563    |
+| 64    | 12800      | 2.344 rpm        | 298 rpm            | 0.0281    |
+| **128** | **25600** | **1.172 rpm**   | **148.8 rpm**      | **0.0141** |
+| 256   | 51200      | 0.586 rpm        | 74.4 rpm           | 0.0070    |
+
+The trade-off is top speed, which falls by the same factor. The manual also caps
+`Vrpm` at 2000 regardless, so the low `MStep` rows are largely unusable. Higher
+microstepping additionally reduces vibration and noise.
+
+The screen's `MStep` menu only offers powers of two, 1 to 256. The serial command
+(`0x84`) accepts any value in that range — the manual's own example uses 26 — but
+sticking to what the screen can display keeps the two in agreement.
+
+**The firmware sets `MStep` at every boot**, from `SERVO_MICROSTEPS`, and reports
+it on the log and in every console banner:
+
+```
+I (612) app: MStep set to 128: 25600 pulses/rev, 0.01 deg/pulse
+I (612) app:   speed range 1.17 rpm (code 1) to 148.8 rpm (code 127)
+I (612) app:   the servo's MStep menu now shows 128 too
+```
+
+```
+MKS SERVO42C control console. Type 'help'.
+MStep 128: 25600 pulses/rev, 0.014 deg/pulse, 1.17-148.8 rpm
+```
+
+This exists because there is no command to *read* `MStep` back, so the firmware
+cannot check the servo and adapt — it can only assert a value. Writing it every
+boot means the two can never disagree, whichever way the screen buttons were last
+used. The cost is one flash write per boot on the servo; set
+`SERVO_APPLY_MICROSTEPS_ON_BOOT` to 0 to skip it, in which case
+`SERVO_MICROSTEPS` must be edited to match the servo by hand or every distance
+and speed will be scaled wrongly.
+
+Changing it at runtime with `set mstep <n>` works too and keeps the conversions
+correct for that session, but does **not** survive a reboot: `SERVO_MICROSTEPS`
+is reasserted. Edit that constant to make a change permanent.
+
 ### Absolute positioning
 
 The servo only moves relative distances, so `goto` reads where the shaft is,
@@ -142,7 +198,7 @@ ERR goto: ended further from the target than it started
 
 Because each `goto` is a single bounded move, a wrong setting cannot run away —
 it overshoots once, reports it, and stops. Accuracy is limited by rounding the
-distance to whole pulses, so about 0.06° at `MStep = 16`.
+distance to whole pulses, so about 0.014° at `MStep = 128`.
 
 ### Homing
 
@@ -428,7 +484,7 @@ chk = (sum of all preceding bytes in the frame) & 0xFF     "CHECKSUM-8"
 - Multi-byte values are big-endian.
 - Speed is a 7-bit code with the direction in bit 7 (`0x80` = CCW), not an RPM:
   `Vrpm = code x 30000 / (MStep x 200)` for a 1.8°/step motor (`x 400` for 0.9°).
-  At `MStep = 16` code 16 is 150 RPM and the maximum code 127 is ~1190 RPM.
+  So RPM falls as `MStep` rises — see [Microstepping](#microstepping-and-speed).
   Keep it under 2000 RPM.
 - `FD` (move by pulses) replies **twice**: status `1` when the move starts and
   status `2` when it completes. `mks_move_pulses()` handles both; pass
