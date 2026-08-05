@@ -43,6 +43,18 @@
 /* How long to wait for the 3-byte acknowledge of a command. */
 #define SERVO_REPLY_TIMEOUT_MS   300
 
+/*
+ * Which way the reported shaft angle counts: 1 if turning clockwise makes
+ * 'read angle' increase, 0 if it makes it decrease.
+ *
+ * This depends on the servo's Dir setting and on the motor's coil wiring, so it
+ * cannot be known in advance. It only affects 'goto', which has to decide which
+ * way to turn to reach an absolute angle. Get it wrong and goto moves away from
+ * its target instead of towards it - it says so and tells you to flip this,
+ * and because each goto is one bounded move it cannot run away.
+ */
+#define SERVO_ANGLE_INCREASES_CW  1
+
 /* ------------------------------------------------------------------ */
 /* WiFi remote control                                                 */
 /* ------------------------------------------------------------------ */

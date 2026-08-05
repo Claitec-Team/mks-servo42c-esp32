@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <inttypes.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -122,8 +123,12 @@ static bool sleep_or_abort(const cmd_sink_t *s, uint32_t ms)
  * for it so that a stop arriving mid-move can take over. On abort we halt the
  * motor here and then swallow whatever the interrupted move reports, so the
  * next command does not read a stale frame as its own reply.
+ *
+ * `announce_ok` false suppresses only the closing "OK" on success, so a caller
+ * like goto can check the result and emit its own. Failures always report.
  */
-static void await_move(const cmd_sink_t *s, const char *what, uint32_t timeout_ms)
+static bool await_move(const cmd_sink_t *s, const char *what,
+                       uint32_t timeout_ms, bool announce_ok)
 {
     uint32_t polls = (timeout_ms + ABORT_POLL_MS - 1) / ABORT_POLL_MS;
     if (polls == 0) {
@@ -140,18 +145,20 @@ static void await_move(const cmd_sink_t *s, const char *what, uint32_t timeout_m
                 cmd_printf(s, "ERR %s abort: stop failed: %s\r\n",
                            what, esp_err_to_name(stop_err));
             }
-            return;
+            return false;
         }
 
         esp_err_t err = mks_wait_move_complete(g_servo, ABORT_POLL_MS);
         if (err == ESP_OK) {
-            report(s, what, ESP_OK);
-            return;
+            if (announce_ok) {
+                report(s, what, ESP_OK);
+            }
+            return true;
         }
         if (err != ESP_ERR_TIMEOUT) {
             report(s, what, err);
             mks_discard_pending(g_servo, 100);
-            return;
+            return false;
         }
     }
 
@@ -160,36 +167,42 @@ static void await_move(const cmd_sink_t *s, const char *what, uint32_t timeout_m
     cmd_printf(s, ".. the servo accepted the move but never reported finishing;"
                   " check 'read en' and 'read protect'\r\n");
     mks_discard_pending(g_servo, 100);
+    return false;
 }
 
-/* Starts a pulse move and tracks it to completion. */
-static void start_and_await(const cmd_sink_t *s, const char *what,
+/* Starts a pulse move and tracks it to completion. Returns true if the move
+ * finished; see await_move() for `announce_ok`. */
+static bool start_and_await(const cmd_sink_t *s, const char *what,
                             mks_dir_t dir, uint8_t code, uint32_t pulses,
-                            uint32_t timeout_ms)
+                            uint32_t timeout_ms, bool announce_ok)
 {
     if (pulses == 0) {
-        cmd_printf(s, "OK %s (zero distance, nothing to do)\r\n", what);
-        return;
+        if (announce_ok) {
+            cmd_printf(s, "OK %s (zero distance, nothing to do)\r\n", what);
+        }
+        return true;
     }
     /* A stop may have arrived between dequeuing this command and starting it.
      * Check before commanding motion, so the motor does not twitch. */
     if (abort_requested(s)) {
         cmd_printf(s, "OK %s pre-empted before start\r\n", what);
-        return;
+        return false;
     }
     mks_run_status_t status = MKS_RUN_FAIL;
     esp_err_t err = mks_start_move_pulses(g_servo, dir, code, pulses, &status);
     if (err != ESP_OK) {
         report(s, what, err);
-        return;
+        return false;
     }
     /* A short move can be over before it answers, and then there is no second
      * reply to wait for. */
     if (status == MKS_RUN_COMPLETE) {
-        report(s, what, ESP_OK);
-        return;
+        if (announce_ok) {
+            report(s, what, ESP_OK);
+        }
+        return true;
     }
-    await_move(s, what, timeout_ms);
+    return await_move(s, what, timeout_ms, announce_ok);
 }
 
 /* Completion timeout for a move, from its length and speed plus margin. */
@@ -351,7 +364,7 @@ static void cmd_move(int argc, char **argv, const cmd_sink_t *s)
                     (degrees < 0.0f) ? MKS_DIR_CCW : MKS_DIR_CW,
                     mks_rpm_to_speed_code(g_servo, rpm),
                     mks_degrees_to_pulses(g_servo, degrees),
-                    move_timeout_ms(degrees / 360.0f, rpm));
+                    move_timeout_ms(degrees / 360.0f, rpm), true);
 }
 
 static void cmd_rev(int argc, char **argv, const cmd_sink_t *s)
@@ -371,7 +384,97 @@ static void cmd_rev(int argc, char **argv, const cmd_sink_t *s)
                     (revs < 0.0f) ? MKS_DIR_CCW : MKS_DIR_CW,
                     mks_rpm_to_speed_code(g_servo, rpm),
                     mks_degrees_to_pulses(g_servo, revs * 360.0f),
-                    move_timeout_ms(revs, rpm));
+                    move_timeout_ms(revs, rpm), true);
+}
+
+/* Which way to turn to make the reported angle change by `delta`. */
+static mks_dir_t dir_for_angle_delta(float delta)
+{
+#if SERVO_ANGLE_INCREASES_CW
+    return (delta >= 0.0f) ? MKS_DIR_CW : MKS_DIR_CCW;
+#else
+    return (delta >= 0.0f) ? MKS_DIR_CCW : MKS_DIR_CW;
+#endif
+}
+
+/*
+ * goto <angle> [rpm] - absolute positioning.
+ *
+ * The servo only moves relative distances, so this reads where the shaft is,
+ * works out the difference, and issues one bounded relative move. The angle is
+ * the servo's own accumulating measurement: it counts across full turns rather
+ * than wrapping at 360, so 'goto 0' after ten forward turns unwinds all ten
+ * rather than taking the short way round. The move distance is printed before
+ * anything turns, so an unintended long unwind can be seen and stopped.
+ *
+ * Afterwards the angle is read back and reported. If the move ended further
+ * from the target than it started, the angle counts the opposite way from what
+ * SERVO_ANGLE_INCREASES_CW claims, which is worth saying plainly - one bounded
+ * move cannot run away, but a second goto would go the wrong way again.
+ */
+static void cmd_goto(int argc, char **argv, const cmd_sink_t *s)
+{
+    float target = 0.0f;
+    float rpm = SERVO_DEFAULT_RPM;
+
+    if (!parse_float(argv[1], &target)) {
+        cmd_printf(s, "ERR goto: bad angle '%s'\r\n", argv[1]);
+        return;
+    }
+    if (argc > 2 && !parse_float(argv[2], &rpm)) {
+        cmd_printf(s, "ERR goto: bad rpm '%s'\r\n", argv[2]);
+        return;
+    }
+
+    float current = 0.0f;
+    esp_err_t err = mks_read_angle_deg(g_servo, &current);
+    if (err != ESP_OK) {
+        cmd_printf(s, "ERR goto: cannot read the current angle: %s\r\n",
+                   esp_err_to_name(err));
+        return;
+    }
+
+    const float delta = target - current;
+    const uint32_t pulses = mks_degrees_to_pulses(g_servo, delta);
+
+    if (pulses == 0) {
+        cmd_printf(s, ".. at %.2f deg, within one pulse of %.2f deg\r\n",
+                   current, target);
+        cmd_printf(s, "OK goto\r\n");
+        return;
+    }
+
+    cmd_printf(s, ".. at %.2f deg, target %.2f deg: moving %+.2f deg "
+                  "at %.1f rpm\r\n", current, target, delta, rpm);
+
+    if (!start_and_await(s, "goto", dir_for_angle_delta(delta),
+                         mks_rpm_to_speed_code(g_servo, rpm), pulses,
+                         move_timeout_ms(delta / 360.0f, rpm), false)) {
+        return;                      /* already reported why */
+    }
+
+    float arrived = 0.0f;
+    err = mks_read_angle_deg(g_servo, &arrived);
+    if (err != ESP_OK) {
+        cmd_printf(s, ".. moved, but the angle could not be read back: %s\r\n",
+                   esp_err_to_name(err));
+        cmd_printf(s, "OK goto\r\n");
+        return;
+    }
+
+    const float residual = target - arrived;
+    cmd_printf(s, ".. arrived at %.2f deg, %+.3f deg from target\r\n",
+               arrived, residual);
+
+    if (fabsf(residual) > fabsf(delta)) {
+        cmd_printf(s, "ERR goto: ended further from the target than it "
+                      "started\r\n");
+        cmd_printf(s, ".. the angle counts the other way round: set "
+                      "SERVO_ANGLE_INCREASES_CW to %d in servo_config.h\r\n",
+                   SERVO_ANGLE_INCREASES_CW ? 0 : 1);
+        return;
+    }
+    cmd_printf(s, "OK goto\r\n");
 }
 
 static void cmd_pulses(int argc, char **argv, const cmd_sink_t *s)
@@ -396,7 +499,7 @@ static void cmd_pulses(int argc, char **argv, const cmd_sink_t *s)
     cmd_printf(s, ".. %ld pulses %s at code %ld (%.1f rpm)\r\n",
                count, argv[1], code, rpm);
     start_and_await(s, "pulses", dir, (uint8_t)code, (uint32_t)count,
-                    move_timeout_ms(revs, rpm));
+                    move_timeout_ms(revs, rpm), true);
 }
 
 static void cmd_run(int argc, char **argv, const cmd_sink_t *s)
@@ -736,11 +839,11 @@ static void cmd_demo(int argc, char **argv, const cmd_sink_t *s)
     const uint32_t pulses = mks_degrees_to_pulses(g_servo, DEMO_REVOLUTIONS * 360.0f);
 
     cmd_printf(s, ".. %+.2f rev cw\r\n", DEMO_REVOLUTIONS);
-    start_and_await(s, "demo cw", MKS_DIR_CW, code, pulses, timeout);
+    start_and_await(s, "demo cw", MKS_DIR_CW, code, pulses, timeout, true);
     if (abort_requested(s)) { cmd_printf(s, "OK demo aborted\r\n"); return; }
 
     cmd_printf(s, ".. %+.2f rev ccw\r\n", -DEMO_REVOLUTIONS);
-    start_and_await(s, "demo ccw", MKS_DIR_CCW, code, pulses, timeout);
+    start_and_await(s, "demo ccw", MKS_DIR_CCW, code, pulses, timeout, true);
     if (abort_requested(s)) { cmd_printf(s, "OK demo aborted\r\n"); return; }
 
     cmd_printf(s, ".. constant speed for 3 s\r\n");
@@ -834,6 +937,7 @@ static const cmd_entry_t kCommands[] = {
     { "stop",      1, cmd_stop,      "stop                       stop motion" },
     { "move",      2, cmd_move,      "move <deg> [rpm]           relative move, blocks" },
     { "rev",       2, cmd_rev,       "rev <revs> [rpm]           relative move, blocks" },
+    { "goto",      2, cmd_goto,      "goto <angle> [rpm]         absolute move, blocks" },
     { "pulses",    4, cmd_pulses,    "pulses <cw|ccw> <code> <n> raw pulse move" },
     { "run",       3, cmd_run,       "run <cw|ccw> <rpm>         constant speed" },
     { "speedcode", 3, cmd_speedcode, "speedcode <cw|ccw> <0-127> constant speed, raw" },
@@ -863,6 +967,8 @@ static void cmd_help(int argc, char **argv, const cmd_sink_t *s)
     cmd_printf(s, "  kp|ki|kd|acc|maxt <n>   addr <0xE0-0xE9>   baud <rate>\r\n");
     cmd_printf(s, "examples:\r\n");
     cmd_printf(s, "  enable 1 / move 90 / move -90 60 / run ccw 120 / stop\r\n");
+    cmd_printf(s, "  goto is absolute and counts across full turns, so it does\r\n");
+    cmd_printf(s, "  not wrap at 360; move/rev are relative\r\n");
     cmd_printf(s, "OK help\r\n");
 }
 

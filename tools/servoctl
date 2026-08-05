@@ -41,7 +41,8 @@ RPM_NUMERATOR = 30000.0
 
 COMMANDS = [
     "help", "info", "net", "status", "read", "enable", "disable", "stop",
-    "move", "rev", "pulses", "run", "speedcode", "save", "zero", "protect",
+    "move", "rev", "goto", "pulses", "run", "speedcode", "save", "zero",
+    "protect",
     "set", "cal", "restore", "demo", "raw", "quit", "exit",
 ]
 READ_FIELDS = ["encoder", "angle", "error", "pulses", "en", "protect"]
@@ -169,8 +170,9 @@ class Policy:
         command = parts[0].lower()
         args = parts[1:]
 
-        # move <deg> [rpm] / rev <revs> [rpm]: supply the default, or cap.
-        if command in ("move", "rev") and len(args) >= 1:
+        # move <deg> / rev <revs> / goto <angle>, each with an optional rpm:
+        # supply the default when it is missing, otherwise cap it.
+        if command in ("move", "rev", "goto") and len(args) >= 1:
             if len(args) == 1:
                 args.append(self._fmt(self.default_rpm))
                 notes.append(f"speed defaulted to "

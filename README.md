@@ -87,6 +87,7 @@ parse them.
 | `read <encoder\|angle\|error\|pulses\|en\|protect>` | one field |
 | `enable [0\|1]` / `disable` / `stop` | motor power and stopping |
 | `move <deg> [rpm]` / `rev <revs> [rpm]` | relative positioning, blocks until done; speed defaults to `SERVO_DEFAULT_RPM` |
+| `goto <angle> [rpm]` | absolute positioning — see below |
 | `pulses <cw\|ccw> <code> <n>` | raw pulse move |
 | `run <cw\|ccw> <rpm>` / `speedcode <cw\|ccw> <0-127>` | constant speed |
 | `save [on\|off]` | store the current speed as power-on behaviour |
@@ -104,6 +105,44 @@ be pasted in.
 The `set` commands write the servo's EEPROM — use them for commissioning, not in
 a loop. `set addr` and `set baud` also re-point this side of the link so the
 session keeps working; edit `servo_config.h` to make the change survive a reboot.
+
+### Absolute positioning
+
+The servo only moves relative distances, so `goto` reads where the shaft is,
+works out the difference, and issues one bounded relative move:
+
+```
+servo> read angle
+OK angle 142.603
+servo> goto 90
+.. at 142.60 deg, target 90.00 deg: moving -52.60 deg at 30.0 rpm
+.. arrived at 90.01 deg, -0.012 deg from target
+OK goto
+```
+
+Two things worth knowing:
+
+**It counts across full turns and does not wrap at 360.** The angle is the
+servo's own accumulating measurement, so after ten forward turns `goto 0` unwinds
+all ten rather than taking the short way round. That is what "absolute" means
+here, and it is the right behaviour for a stage or an axis, but it can be a
+surprise on something that spins freely — which is why the move distance is
+printed before anything turns, so a long unwind can be seen and stopped.
+
+**The direction depends on your wiring.** Whether a clockwise move makes the
+reported angle rise or fall depends on the servo's `Dir` setting and the motor's
+coil order, so it cannot be known in advance. `SERVO_ANGLE_INCREASES_CW` in
+`servo_config.h` says which it is, defaulting to 1. If it is wrong, `goto` moves
+away from the target and says so:
+
+```
+ERR goto: ended further from the target than it started
+.. the angle counts the other way round: set SERVO_ANGLE_INCREASES_CW to 0 in servo_config.h
+```
+
+Because each `goto` is a single bounded move, a wrong setting cannot run away —
+it overshoots once, reports it, and stops. Accuracy is limited by rounding the
+distance to whole pulses, so about 0.06° at `MStep = 16`.
 
 ### Homing
 
@@ -255,11 +294,11 @@ OK run
 - **Ctrl-C sends `stop`** rather than quitting. With a motor turning, the reflex
   key should be a brake — quitting the client would leave it spinning. Use
   Ctrl-D or `quit` to exit.
-- **Default speed** of 30 rpm filled in whenever `move`/`rev` omit one, matching
-  `SERVO_DEFAULT_RPM` in the firmware so both consoles behave alike.
-- **Speed cap** of 100 rpm applied to `move`, `rev`, `run`, and — via the
-  geometry read from `info` at connect — to the raw speed codes in `speedcode`
-  and `pulses`.
+- **Default speed** of 30 rpm filled in whenever `move`/`rev`/`goto` omit one,
+  matching `SERVO_DEFAULT_RPM` in the firmware so both consoles behave alike.
+- **Speed cap** of 100 rpm applied to `move`, `rev`, `goto`, `run`, and — via
+  the geometry read from `info` at connect — to the raw speed codes in
+  `speedcode` and `pulses`.
 
 Both limits are adjustable: `--default-rpm`, `--max-rpm`. Every rewrite is
 announced with a `--` line, so nothing changes silently.
