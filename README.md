@@ -228,9 +228,14 @@ accepts it and homes on its own, so poll `read angle` to see it arrive.
 
 An `FD` move is supposed to be acknowledged twice: status 1 when it starts and
 status 2 when it finishes. On the hardware this was developed against **the second
-frame frequently never arrives**, at rates from a few percent to most moves
-depending on timing — while the shaft reaches the commanded position every time.
-The acknowledgement is simply not trustworthy on its own.
+frame goes missing on roughly half of all moves** — measured 25/50 back-to-back,
+and 5/8 and 4/8 in single-direction batches, so it is not tied to direction —
+while the shaft reaches the commanded position every time.
+
+Worse, the acknowledgement can arrive when nothing moved at all: with the motor
+disabled the servo still answered "run complete" for every move while the shaft
+sat still. So the frame is evidence that the command was accepted, not that the
+shaft went anywhere.
 
 So a move that gets no completion frame is settled by the encoder rather than
 assumed failed. `move`/`rev`/`pulses`/`goto` read the shaft angle before starting,
@@ -257,6 +262,12 @@ of it is dead time before the encoder is consulted.
 Following error (`read error`) is *not* usable as a witness here, in case it looks
 tempting: the closed loop keeps it under about half a degree even mid-move, so it
 cannot tell "finished" from "still going".
+
+Measured after the change: 50 back-to-back moves gave 25 completion frames, 25
+encoder confirmations and **0 failures**, with 0.022° of drift over the 50 —
+against 48 failures out of 50 for the same test beforehand. A move that really
+cannot complete, such as one issued while the motor is disabled, is still
+reported as a failure.
 
 If the servo does not answer at boot, the firmware prints a wiring/config
 checklist and still starts the console, so you can probe by hand with `raw`.
