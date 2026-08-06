@@ -775,10 +775,18 @@ static void cmd_zero(int argc, char **argv, const cmd_sink_t *s)
         return;
     }
     if (strcasecmp(sub, "here") == 0) {
-        esp_err_t err = mks_set_zero_here(g_servo);
+        /* Measured on hardware to take noticeably longer to reply than the
+         * other zero-mode settings - give it more room than the console's
+         * usual budget rather than mistaking that for a communication fault. */
+        esp_err_t err = mks_set_zero_here(g_servo, 2000);
         report(s, "zero here", err);
-        if (err != ESP_OK) {
+        if (err == ESP_FAIL) {
+            /* The servo answered and rejected it - this is the known cause. */
             cmd_printf(s, ".. 0_Mode must not be Disable: run 'zero mode dir' first\r\n");
+        } else if (err != ESP_OK) {
+            /* No usable reply at all - a link problem, not a mode problem. */
+            cmd_printf(s, ".. no reply from the servo; check the wiring and "
+                          "try again\r\n");
         }
         return;
     }

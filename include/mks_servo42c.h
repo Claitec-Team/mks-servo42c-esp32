@@ -211,7 +211,12 @@ esp_err_t mks_reconfigure_link(mks_t *h, int baud_rate, uint8_t address);
 /* ------------------------------------------------------------------ */
 
 esp_err_t mks_set_zero_mode(mks_t *h, mks_zero_mode_t mode);         /* 0x90 */
-esp_err_t mks_set_zero_here(mks_t *h);                               /* 0x91 */
+
+/* 0x91: store the current position as the zero point. Measured on hardware to
+ * take noticeably longer than the other zero-mode settings (0x90/0x92/0x93),
+ * likely an EEPROM write rather than a RAM-only change - pass a timeout longer
+ * than h->cfg.reply_timeout_ms, e.g. 2000ms. */
+esp_err_t mks_set_zero_here(mks_t *h, uint32_t timeout_ms);
 
 /* 0x92: 0..4, lower is faster. */
 esp_err_t mks_set_zero_speed(mks_t *h, uint8_t speed);

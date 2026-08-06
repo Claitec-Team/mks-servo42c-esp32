@@ -605,10 +605,10 @@ esp_err_t mks_set_zero_mode(mks_t *h, mks_zero_mode_t mode)
     return mks_command_u8(h, CMD_SET_ZERO_MODE, (uint8_t)mode);
 }
 
-esp_err_t mks_set_zero_here(mks_t *h)
+esp_err_t mks_set_zero_here(mks_t *h, uint32_t timeout_ms)
 {
     uint8_t data = 0x00;
-    return mks_command_status(h, CMD_SET_ZERO_HERE, &data, 1, h->cfg.reply_timeout_ms);
+    return mks_command_status(h, CMD_SET_ZERO_HERE, &data, 1, timeout_ms);
 }
 
 esp_err_t mks_set_zero_speed(mks_t *h, uint8_t speed)
