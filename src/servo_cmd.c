@@ -167,6 +167,18 @@ static esp_err_t read_angle_signed(float *out_deg)
     return err;
 }
 
+/* `deg` reduced to [0, 360) - the position you'd read off a dial, as opposed
+ * to the turn-counting value everything else here works with (needed so that
+ * 'goto' can tell a target ten turns away from one next door). */
+static float wrap_360(float deg)
+{
+    float w = fmodf(deg, 360.0f);
+    if (w < 0.0f) {
+        w += 360.0f;
+    }
+    return w;
+}
+
 /* How often a long-running command checks for a pre-empting stop. */
 #define ABORT_POLL_MS 50
 
@@ -394,7 +406,8 @@ static void cmd_status(int argc, char **argv, const cmd_sink_t *s)
 
     float angle = 0.0f;
     if (read_angle_signed(&angle) == ESP_OK) {
-        cmd_printf(s, "angle     %.2f deg\r\n", angle);
+        cmd_printf(s, "angle     %.2f deg (%.2f wrapped to 0-360)\r\n",
+                   angle, wrap_360(angle));
     }
 
     float err_deg = 0.0f;
@@ -435,7 +448,11 @@ static void cmd_read(int argc, char **argv, const cmd_sink_t *s)
     } else if (strcasecmp(what, "angle") == 0) {
         float deg = 0.0f;
         err = read_angle_signed(&deg);
-        if (err == ESP_OK) { cmd_printf(s, "OK angle %.3f\r\n", deg); return; }
+        if (err == ESP_OK) {
+            cmd_printf(s, ".. wrapped to 0-360: %.2f deg\r\n", wrap_360(deg));
+            cmd_printf(s, "OK angle %.3f\r\n", deg);
+            return;
+        }
     } else if (strcasecmp(what, "error") == 0) {
         float deg = 0.0f;
         err = mks_read_angle_error_deg(g_servo, &deg);
