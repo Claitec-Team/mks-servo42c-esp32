@@ -89,6 +89,7 @@ parse them.
 | ------- | ------- |
 | `help` / `info` / `status` / `net` | command list, local geometry, full readback, network state |
 | `read <encoder\|angle\|error\|pulses\|en\|protect>` | one field |
+| `angle` | shortcut for `read angle` — current position in degrees |
 | `enable [0\|1]` / `disable` / `stop` | motor power and stopping |
 | `move <deg> [rpm]` / `rev <revs> [rpm]` | relative positioning, blocks until done; speed defaults to `SERVO_DEFAULT_RPM` |
 | `goto <angle> [rpm]` | absolute positioning, shortest way round — see below |
@@ -188,16 +189,29 @@ after a few turns the reading will not equal the target numerically even though
 the shaft is in the right place — `goto 0` from `720.0` is already there and does
 not move. Every error reported is therefore a modular one.
 
-**The direction depends on your wiring.** Whether a clockwise move makes the
-reported angle rise or fall depends on the servo's `Dir` setting and the motor's
-coil order, so it cannot be known in advance. `SERVO_ANGLE_INCREASES_CW` in
-`servo_config.h` says which it is. On the hardware this was developed against a
-clockwise move *decreases* the angle, so it is set to 0 — check yours, because if
-it is wrong `goto` moves away from the target and says so:
+**The direction depends on your wiring, and there are two independent knobs for it**
+in `servo_config.h`:
+
+- `SERVO_ANGLE_INCREASES_CW` — a hardware fact, fixed by the servo's `Dir` setting
+  and the motor's coil order. Whether the servo's own encoder counts up or down
+  for a clockwise turn cannot be known in advance, so this is set by direct
+  measurement (turn the motor a known way, watch `read angle`) and shouldn't need
+  touching again unless the wiring changes.
+- `SERVO_ANGLE_SIGN` (`+1` or `-1`) — negates every angle before it is shown or
+  targeted, so `read angle`/`goto` can be made to agree with something else: an
+  external sensor, a mechanical reference, or just a preferred sense of increasing.
+  This is the knob to reach for if `goto <target>` turns the physically wrong way
+  relative to what you're comparing it against — it does not touch `move`/`rev`
+  (their sign picks a turning direction, not a target reading) or the `cw`/`ccw`
+  tokens taken by `run`, `pulses`, `speedcode` and `zero dir`, which always name
+  the servo's own raw directions regardless of this setting.
+
+If either is wrong, `goto` moves away from the target instead of towards it, and
+says so rather than failing silently:
 
 ```
 ERR goto: ended further from the target than it started
-.. the angle counts the other way round: set SERVO_ANGLE_INCREASES_CW to 0 in servo_config.h
+.. turned the wrong way: try setting SERVO_ANGLE_SIGN to 1 in servo_config.h
 ```
 
 Because each `goto` is a single bounded move, a wrong setting cannot run away —
@@ -281,7 +295,7 @@ The En and protection states are read and printed at that point rather than
 merely suggested, so the likely cause is already on screen.
 
 The comparison is by magnitude, so it does not depend on
-`SERVO_ANGLE_INCREASES_CW`. The timeout margin is deliberately small (15% of the
+`SERVO_ANGLE_INCREASES_CW` or `SERVO_ANGLE_SIGN`. The timeout margin is deliberately small (15% of the
 expected travel plus 800 ms) because it is reached so often, and every millisecond
 of it is dead time before the encoder is consulted.
 

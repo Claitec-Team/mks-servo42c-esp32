@@ -151,6 +151,22 @@ static void report_stuck_state(const cmd_sink_t *s)
     }
 }
 
+/*
+ * mks_read_angle_deg(), corrected by SERVO_ANGLE_SIGN so that what is shown or
+ * targeted matches an external reference rather than the servo's own raw
+ * encoder convention. Everything user-facing that deals in absolute position
+ * goes through this rather than the driver call directly.
+ */
+static esp_err_t read_angle_signed(float *out_deg)
+{
+    float raw = 0.0f;
+    esp_err_t err = mks_read_angle_deg(g_servo, &raw);
+    if (err == ESP_OK && out_deg != NULL) {
+        *out_deg = raw * (float)SERVO_ANGLE_SIGN;
+    }
+    return err;
+}
+
 /* How often a long-running command checks for a pre-empting stop. */
 #define ABORT_POLL_MS 50
 
@@ -352,6 +368,18 @@ static uint32_t move_timeout_ms(float revolutions, float rpm)
 /* Readback                                                            */
 /* ------------------------------------------------------------------ */
 
+static void cmd_read(int argc, char **argv, const cmd_sink_t *s);
+
+/* Shortcut for 'read angle': checking position is common enough while
+ * turning the motor by hand to deserve one word instead of two. */
+static void cmd_angle(int argc, char **argv, const cmd_sink_t *s)
+{
+    (void)argc;
+    char field[] = "angle";
+    char *args[2] = { argv[0], field };
+    cmd_read(2, args, s);
+}
+
 static void cmd_status(int argc, char **argv, const cmd_sink_t *s)
 {
     (void)argc; (void)argv;
@@ -365,7 +393,7 @@ static void cmd_status(int argc, char **argv, const cmd_sink_t *s)
     }
 
     float angle = 0.0f;
-    if (mks_read_angle_deg(g_servo, &angle) == ESP_OK) {
+    if (read_angle_signed(&angle) == ESP_OK) {
         cmd_printf(s, "angle     %.2f deg\r\n", angle);
     }
 
@@ -406,7 +434,7 @@ static void cmd_read(int argc, char **argv, const cmd_sink_t *s)
         }
     } else if (strcasecmp(what, "angle") == 0) {
         float deg = 0.0f;
-        err = mks_read_angle_deg(g_servo, &deg);
+        err = read_angle_signed(&deg);
         if (err == ESP_OK) { cmd_printf(s, "OK angle %.3f\r\n", deg); return; }
     } else if (strcasecmp(what, "error") == 0) {
         float deg = 0.0f;
@@ -502,13 +530,16 @@ static void cmd_rev(int argc, char **argv, const cmd_sink_t *s)
                     move_timeout_ms(revs, rpm), true, note);
 }
 
-/* Which way to turn to make the reported angle change by `delta`. */
+/* Which way to turn to make the displayed angle (i.e. after SERVO_ANGLE_SIGN)
+ * change by `delta`. Converts back to the servo's raw sign first, since that
+ * is what SERVO_ANGLE_INCREASES_CW is measured against. */
 static mks_dir_t dir_for_angle_delta(float delta)
 {
+    const float raw_delta = delta * (float)SERVO_ANGLE_SIGN;
 #if SERVO_ANGLE_INCREASES_CW
-    return (delta >= 0.0f) ? MKS_DIR_CW : MKS_DIR_CCW;
+    return (raw_delta >= 0.0f) ? MKS_DIR_CW : MKS_DIR_CCW;
 #else
-    return (delta >= 0.0f) ? MKS_DIR_CCW : MKS_DIR_CW;
+    return (raw_delta >= 0.0f) ? MKS_DIR_CCW : MKS_DIR_CW;
 #endif
 }
 
@@ -539,9 +570,9 @@ static float shortest_delta(float from, float to)
  * right place - every error here is therefore a modular one.
  *
  * Afterwards the angle is read back and reported. If the move ended further
- * from the target than it started, the angle counts the opposite way from what
- * SERVO_ANGLE_INCREASES_CW claims, which is worth saying plainly - one bounded
- * move cannot run away, but a second goto would go the wrong way again.
+ * from the target than it started, SERVO_ANGLE_SIGN does not match the real
+ * world, which is worth saying plainly - one bounded move cannot run away, but
+ * a second goto would go the wrong way again.
  */
 static void cmd_goto(int argc, char **argv, const cmd_sink_t *s)
 {
@@ -558,7 +589,7 @@ static void cmd_goto(int argc, char **argv, const cmd_sink_t *s)
     }
 
     float current = 0.0f;
-    esp_err_t err = mks_read_angle_deg(g_servo, &current);
+    esp_err_t err = read_angle_signed(&current);
     if (err != ESP_OK) {
         cmd_printf(s, "ERR goto: cannot read the current angle: %s\r\n",
                    esp_err_to_name(err));
@@ -586,7 +617,7 @@ static void cmd_goto(int argc, char **argv, const cmd_sink_t *s)
     }
 
     float arrived = 0.0f;
-    err = mks_read_angle_deg(g_servo, &arrived);
+    err = read_angle_signed(&arrived);
     if (err != ESP_OK) {
         cmd_printf(s, ".. moved, but the angle could not be read back: %s\r\n",
                    esp_err_to_name(err));
@@ -601,9 +632,8 @@ static void cmd_goto(int argc, char **argv, const cmd_sink_t *s)
     if (fabsf(residual) > fabsf(delta)) {
         cmd_printf(s, "ERR goto: ended further from the target than it "
                       "started\r\n");
-        cmd_printf(s, ".. the angle counts the other way round: set "
-                      "SERVO_ANGLE_INCREASES_CW to %d in servo_config.h\r\n",
-                   SERVO_ANGLE_INCREASES_CW ? 0 : 1);
+        cmd_printf(s, ".. turned the wrong way: try setting SERVO_ANGLE_SIGN "
+                      "to %d in servo_config.h\r\n", -SERVO_ANGLE_SIGN);
         return;
     }
     cmd_printf(s, "OK goto\r\n");
@@ -1072,6 +1102,7 @@ static const cmd_entry_t kCommands[] = {
     { "net",       1, cmd_net,       "net                        wifi and tcp status" },
     { "status",    1, cmd_status,    "status                     read everything" },
     { "read",      2, cmd_read,      "read <encoder|angle|error|pulses|en|protect>" },
+    { "angle",     1, cmd_angle,     "angle                      shortcut for 'read angle'" },
     { "enable",    1, cmd_enable,    "enable [0|1]               energise the motor" },
     { "disable",   1, cmd_disable,   "disable                    de-energise" },
     { "stop",      1, cmd_stop,      "stop                       stop motion" },

@@ -73,8 +73,33 @@
  *
  * Measured on this hardware: 'move +10' (clockwise) moved the reported angle
  * from -119.987 to -129.974, so clockwise decreases it. Hence 0.
+ *
+ * This is a hardware fact, verified by direct measurement, and is not the knob
+ * to reach for if 'goto' turns the wrong way relative to some other reference -
+ * that is SERVO_ANGLE_SIGN below. This one would only need revisiting if the
+ * servo's Dir setting or the motor's wiring changed.
  */
 #define SERVO_ANGLE_INCREASES_CW  0
+
+/*
+ * Sign applied to every angle this firmware shows or targets: +1 to report the
+ * servo's own raw encoder convention unchanged, -1 to negate it.
+ *
+ * The servo's encoder has its own arbitrary sign convention, fixed by wiring.
+ * If you compare positions against something else - a separate sensor, a
+ * mechanical reference, or just "clockwise should mean higher numbers" as you
+ * see it - this is the knob to flip until they agree. It changes what number
+ * 'read angle'/'status'/'angle' report and what 'goto <target>' aims for, and
+ * consequently which way 'goto' turns to get there - but it does not touch
+ * move/rev (their sign picks a turning direction, not a target reading) or the
+ * cw/ccw tokens taken by run, pulses, speedcode and zero dir, which always name
+ * the servo's own raw directions.
+ *
+ * Measured on this hardware: with this at +1, 'goto 90' from a reading of 0
+ * turned clockwise in the real world. Set to -1 so it turns counter-clockwise
+ * instead, to match an external sensor that reports angles that way.
+ */
+#define SERVO_ANGLE_SIGN  -1
 
 /* ------------------------------------------------------------------ */
 /* WiFi remote control                                                 */

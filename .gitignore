@@ -12,3 +12,6 @@ compile_commands.json
 
 # WiFi credentials, generated from the environment on every build
 include/wifi_credentials.h
+
+# Python bytecode cache from syntax-checking tools/servoctl
+__pycache__/
