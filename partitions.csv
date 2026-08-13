@@ -1,0 +1,19 @@
+# Partition table for OTA updates (see include/ota_update.h, tools/servoctl --ota).
+#
+# The stock single-app layout has nowhere to stage a new image, so OTA needs two
+# app slots plus the small "otadata" partition that records which one to boot.
+# esptool (pio run -t upload over USB) writes to ota_0; from then on each OTA
+# lands in whichever slot is not running and the bootloader switches to it, so a
+# failed update never overwrites the image you are running.
+#
+# Switching to this table changes the flash layout, so the first time you use it
+# you must flash once over USB - an OTA cannot get you here from the old layout.
+#
+# 4 MB flash. Each app slot is 1.5 MB, comfortably above this firmware's ~1 MB.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x4000,
+otadata,    data, ota,     0xd000,   0x2000,
+phy_init,   data, phy,     0xf000,   0x1000,
+ota_0,      app,  ota_0,   0x10000,  0x180000,
+ota_1,      app,  ota_1,   0x190000, 0x180000,

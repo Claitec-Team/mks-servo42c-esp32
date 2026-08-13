@@ -16,6 +16,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -24,6 +25,7 @@
 #include "console_tcp.h"
 #include "diag.h"
 #include "mks_servo42c.h"
+#include "ota_update.h"
 #include "servo_cmd.h"
 #include "servo_config.h"
 #include "servo_ctl.h"
@@ -65,6 +67,34 @@ static void log_reset_reason(void)
     default:
         ESP_LOGI(TAG, "reset: reason %d", (int)esp_reset_reason());
         break;
+    }
+}
+
+/*
+ * With rollback enabled (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE), a freshly
+ * OTA'd image boots in the PENDING_VERIFY state and the bootloader will revert
+ * to the previous slot on the next reset unless the image confirms itself.
+ * Reaching the end of app_main with the console tasks started is our
+ * self-test: the firmware is clearly running rather than crash-looping, so it
+ * is safe to make this slot permanent. Harmless on a USB-flashed image, whose
+ * state is not PENDING_VERIFY.
+ */
+static void confirm_ota_image(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    if (esp_ota_get_state_partition(running, &state) != ESP_OK) {
+        return;
+    }
+    if (state == ESP_OTA_IMG_PENDING_VERIFY) {
+        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+            ESP_LOGI(TAG, "OTA image on '%s' confirmed valid; rollback cancelled",
+                     running->label);
+        } else {
+            ESP_LOGW(TAG, "could not confirm OTA image; it may roll back");
+        }
+    } else {
+        ESP_LOGI(TAG, "running from '%s'", running->label);
     }
 }
 
@@ -192,7 +222,13 @@ void app_main(void)
      * listener retries until the stack is up, so ordering does not matter. */
     if (wifi_link_start() == ESP_OK) {
         ESP_ERROR_CHECK(console_tcp_start(SERVO_TCP_PORT));
+        /* Firmware updates over the same WiFi link: servoctl <ip> --ota. */
+        ESP_ERROR_CHECK(ota_update_start(SERVO_OTA_PORT));
     }
+
+    /* The console is up and the firmware is plainly running, so if we booted a
+     * new OTA image on trial, make it permanent now (otherwise it rolls back). */
+    confirm_ota_image();
 
     /* Everything from here on happens in the servo, console and network tasks. */
 }

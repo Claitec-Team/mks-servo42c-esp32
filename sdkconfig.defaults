@@ -15,3 +15,10 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # app_main brings WiFi up, and esp_wifi_start() with PHY calibration is
 # stack-hungry. The 3584-byte default leaves little headroom.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=5120
+
+# OTA rollback: a freshly flashed image boots "on trial" and must call
+# esp_ota_mark_app_valid_cancel_rollback() (main.c does, once the console is up)
+# or the bootloader reverts to the previous slot on the next reset. Turns a bad
+# OTA into an automatic recovery instead of a device that has to be re-flashed
+# over USB.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

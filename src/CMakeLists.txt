@@ -7,6 +7,7 @@ idf_component_register(
         "console_serial.c"
         "console_tcp.c"
         "wifi_link.c"
+        "ota_update.c"
         "diag.c"
     INCLUDE_DIRS
         "."
@@ -19,4 +20,5 @@ idf_component_register(
         esp_event
         nvs_flash
         lwip
+        app_update
 )

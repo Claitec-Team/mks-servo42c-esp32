@@ -57,6 +57,11 @@ pio device monitor       # log console, 115200 baud
 The monitor's 115200 baud is the ESP-IDF console on UART0 and is unrelated to the
 38400 baud servo link on UART2.
 
+The flash layout has two application slots for over-the-air updates
+(`partitions.csv`), so the **first** flash of this firmware onto a board must go
+over USB as above; after that you can update over WiFi with
+[`servoctl --ota`](#firmware-updates-over-wifi-ota).
+
 ## Control console
 
 `src/main.c` brings the link up, then hands over to an interactive console on the
@@ -461,6 +466,68 @@ announced with a `--` line, so nothing changes silently.
 > forward the port through a router. The credentials are also compiled into the
 > firmware image, so treat `firmware.bin` as a secret too.
 
+### Firmware updates over WiFi (OTA)
+
+Once WiFi works you can replace the firmware over the network, no USB cable
+needed. `tools/servoctl` pushes a built image to the device, which writes it to
+its spare flash slot and reboots into it:
+
+```sh
+pio run -e esp32dev                                   # build, don't upload
+tools/servoctl 192.168.1.57 --ota .pio/build/esp32dev/firmware.bin
+```
+
+```
+servoctl: OTA .pio/build/esp32dev/firmware.bin (849.4 KiB) -> 192.168.1.57:3334
+  OK begin ota_1 869744
+  [##############################] 100%  849/849 KiB
+  OK done ota_1, rebooting
+servoctl: device is rebooting into the new firmware
+```
+
+`--ota` is a self-contained mode: it uploads and exits rather than opening the
+console. The image goes to a **separate port**, one above the command port
+(`SERVO_OTA_PORT`, 3334 by default; override with `--ota-port`), because the
+payload is a raw binary stream rather than lines of text.
+
+**One-time setup.** OTA needs two application slots to swap between, so the flash
+layout changed (`partitions.csv`: `ota_0` + `ota_1` + `otadata`, replacing the
+stock single-app layout). An OTA cannot itself move you onto the new layout, so
+the **first** time, flash once over USB:
+
+```sh
+pio run -e esp32dev -t upload
+```
+
+From then on, updates can go over WiFi.
+
+**Why a bad update can't brick it.** Three independent safety nets:
+
+- The image is written to whichever slot is *not* running. The firmware you are
+  using is never touched during the transfer, so a dropped connection or a
+  half-sent file leaves it intact — the device just reports `ERR` and keeps
+  running.
+- `esp_ota_end()` validates the image before it is eligible to boot; a truncated
+  or corrupt push is rejected outright.
+- Rollback is enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`). A freshly
+  installed image boots *on trial*; `app_main()` only makes it permanent once it
+  has brought the console up (`confirm_ota_image()` in `main.c`). An image that
+  crashes on boot never confirms itself, so the bootloader reverts to the
+  previous slot on the next reset.
+
+Worst case — an image that boots, confirms itself, and only *then* misbehaves —
+is still recoverable over USB, which rewrites `ota_0` directly.
+
+The reboot interrupts whatever the servo was doing, so don't push an update in
+the middle of a move. The motor is closed-loop and holds position through the
+reset; the link, microsteps and other boot-time settings are re-applied on the
+way back up.
+
+> **Security.** The OTA port is unauthenticated, exactly like the command port:
+> anyone who can reach it can replace the firmware. Keep it on a trusted network
+> and do not forward it through a router. See the SECURITY note in
+> `servo_config.h`.
+
 ### If it reboots as soon as WiFi is enabled
 
 Powering up the radio is the largest current spike in the whole boot, and a board
@@ -632,10 +699,11 @@ goes to the ESP32's RX pin. Use the header's own `G` as the ground reference.
 
 ```
 platformio.ini              build config: env:esp32dev and env:diag
-sdkconfig.defaults          ESP-IDF options (4 MB flash, full printf, console on UART0)
+partitions.csv              flash layout: two OTA app slots + otadata
+sdkconfig.defaults          ESP-IDF options (4 MB flash, full printf, OTA rollback)
 CMakeLists.txt              IDF project entry point
 scripts/wifi_credentials.py generates wifi_credentials.h from the environment
-tools/servoctl              host-side client: history, completion, speed cap
+tools/servoctl              host-side client: history, completion, speed cap, --ota
 include/servo_config.h      wiring, baud, address, motor, wifi and demo settings
 include/mks_servo42c.h      driver API
 src/mks_servo42c.c          protocol implementation
@@ -643,6 +711,7 @@ src/servo_cmd.c             text command layer, transport-agnostic
 src/servo_ctl.c             servo task: owns the handle, queues, pre-emption
 src/console_serial.c        UART0 transport for the command layer
 src/console_tcp.c           TCP transport, up to four concurrent clients
+src/ota_update.c            OTA receiver: pushed firmware to the spare flash slot
 src/wifi_link.c             station setup and reconnection
 src/diag.c                  link diagnostics (env:diag only)
 src/main.c                  startup: bring up the link, start the transports

@@ -153,6 +153,14 @@
 /* TCP port for the command interface: `nc <ip> 3333`. */
 #define SERVO_TCP_PORT       3333
 
+/*
+ * TCP port for pushing firmware updates: `servoctl <ip> --ota firmware.bin`.
+ * A separate port from the command console because the payload is a raw binary
+ * stream, not lines of text. Same trust model as the command port - see the
+ * SECURITY note above; anyone who can reach it can replace the firmware.
+ */
+#define SERVO_OTA_PORT       3334
+
 /* ------------------------------------------------------------------ */
 /* Demo behaviour (src/main.c)                                         */
 /* ------------------------------------------------------------------ */

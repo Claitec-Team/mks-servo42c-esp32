@@ -9,7 +9,8 @@ A friendlier netcat for this particular protocol:
   * a client-side speed cap, and a default speed for commands that omit one
 
 Usage:
-    servoctl <host> [port]          # port defaults to 3333
+    servoctl <host> [port]                 # interactive; port defaults to 3333
+    servoctl <host> --ota firmware.bin     # push a firmware update and exit
 
 Replies stream in on their own thread, so a 'stop' typed during a long move
 reaches the servo immediately - the same reason the firmware does not block its
@@ -18,6 +19,11 @@ console task on command completion.
 The speed cap is a convenience, not a safety interlock: it lives here, so
 anything that talks to the port directly bypasses it. Prefix a line with '!' to
 bypass it deliberately.
+
+With --ota the firmware image (.pio/build/<env>/firmware.bin) is streamed to the
+device's OTA port; the device writes it to its spare flash slot and reboots into
+it. A partial or bad image never touches the running firmware, and a new image
+that fails to come up rolls back on its own. See include/ota_update.h.
 """
 
 import argparse
@@ -33,6 +39,13 @@ DEFAULT_RPM = 10.0
 MAX_RPM = 20.0
 PROMPT = "servo> "
 HISTORY_LIMIT = 2000
+
+# OTA push. The firmware's OTA listener is one port above the command port
+# (SERVO_OTA_PORT in servo_config.h).
+OTA_PORT_OFFSET = 1
+OTA_CHUNK = 8192
+OTA_ACK_TIMEOUT = 30.0       # s; erasing a 1.5 MB slot can take a few seconds
+ESP_IMAGE_MAGIC = 0xE9       # first byte of any ESP32 firmware.bin
 
 # The servo's speed byte is a code, not an RPM figure:
 #     rpm = code * 30000 / pulses_per_rev
@@ -252,6 +265,93 @@ def reader_thread(sock, policy, printer, on_close):
     on_close()
 
 
+def render_progress(sent, total):
+    """One-line progress bar on the current terminal line."""
+    if not sys.stdout.isatty():
+        return
+    frac = sent / total if total else 1.0
+    width = 30
+    filled = int(width * frac)
+    bar = "#" * filled + "-" * (width - filled)
+    sys.stdout.write(f"\r  [{bar}] {frac * 100:3.0f}%  "
+                     f"{sent / 1024:.0f}/{total / 1024:.0f} KiB")
+    sys.stdout.flush()
+
+
+def do_ota(host, port, path, colours):
+    """Streams a firmware image to the device's OTA port. Never returns on
+    error - it exits the process with a message."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        sys.exit(f"servoctl: cannot read {path}: {exc}")
+
+    size = len(data)
+    if size == 0:
+        sys.exit(f"servoctl: {path} is empty")
+    # Catch an obviously wrong file (an .elf, a .bin.gz, the wrong path) before
+    # spending a minute uploading it; the device would reject it anyway.
+    if data[0] != ESP_IMAGE_MAGIC:
+        sys.exit(f"servoctl: {path} does not look like an ESP32 firmware image "
+                 f"(first byte 0x{data[0]:02x}, expected 0x{ESP_IMAGE_MAGIC:02x}). "
+                 f"Point --ota at .pio/build/<env>/firmware.bin")
+
+    print(f"servoctl: OTA {path} ({size / 1024:.1f} KiB) -> {host}:{port}")
+    try:
+        sock = socket.create_connection((host, port), timeout=10)
+    except OSError as exc:
+        sys.exit(f"servoctl: cannot connect to {host}:{port}: {exc}")
+    sock.settimeout(OTA_ACK_TIMEOUT)
+    reader = sock.makefile("rb")
+
+    def read_reply():
+        try:
+            line = reader.readline()
+        except OSError as exc:
+            sys.exit(f"servoctl: lost the connection: {exc}")
+        return line.decode("utf-8", "replace").strip()
+
+    try:
+        sock.sendall(f"OTA {size}\n".encode())
+        # The device erases the target slot before acknowledging, so this first
+        # reply can take a few seconds.
+        ack = read_reply()
+        if not ack.startswith("OK"):
+            sys.exit(f"servoctl: device refused the update: "
+                     f"{ack or '(no reply)'}")
+        print("  " + colours.paint(ack))
+
+        sent = 0
+        try:
+            while sent < size:
+                chunk = data[sent:sent + OTA_CHUNK]
+                sock.sendall(chunk)
+                sent += len(chunk)
+                render_progress(sent, size)
+        except OSError as exc:
+            # The device may have bailed out and sent an ERR; surface that if so.
+            if sys.stdout.isatty():
+                print()
+            trailing = read_reply()
+            sys.exit(f"servoctl: upload failed: {exc}"
+                     + (f" ({trailing})" if trailing else ""))
+        if sys.stdout.isatty():
+            print()
+
+        result = read_reply()
+        print("  " + colours.paint(result))
+        if not result.startswith("OK"):
+            sys.exit(1)
+        print("servoctl: device is rebooting into the new firmware")
+    except KeyboardInterrupt:
+        sys.exit("\nservoctl: OTA aborted; the device discards the partial "
+                 "image and keeps running the current firmware")
+    finally:
+        reader.close()
+        sock.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Interactive client for the MKS SERVO42C command port.")
@@ -265,13 +365,26 @@ def main():
                              f"(default {DEFAULT_RPM:g})")
     parser.add_argument("--no-colour", action="store_true",
                         help="never colourise replies")
+    parser.add_argument("--ota", metavar="FIRMWARE.BIN",
+                        help="push this firmware image to the device and exit, "
+                             "instead of opening the interactive console")
+    parser.add_argument("--ota-port", type=int, default=None,
+                        help="OTA port (default: command port + 1)")
     args = parser.parse_args()
+
+    colours = Colours(sys.stdout.isatty() and not args.no_colour)
+
+    # Firmware push is a self-contained, non-interactive mode.
+    if args.ota:
+        ota_port = (args.ota_port if args.ota_port is not None
+                    else args.port + OTA_PORT_OFFSET)
+        do_ota(args.host, ota_port, args.ota, colours)
+        return
 
     if args.default_rpm > args.max_rpm:
         parser.error(f"--default-rpm ({args.default_rpm:g}) exceeds "
                      f"--max-rpm ({args.max_rpm:g})")
 
-    colours = Colours(sys.stdout.isatty() and not args.no_colour)
     printer = Printer(colours)
     policy = Policy(args.default_rpm, args.max_rpm)
 
